@@ -210,6 +210,15 @@
     var _plexTmdbIndex = getStoredTmdbIndex();
     var _tmdbIndexRebuildInProgress = false;
 
+    // Те же правила, что и у «Медиатека Plex»: если пользователь ни разу не
+    // открывал «Выбрать библиотеки», getSections() пуст — в этом случае
+    // берём все доступные секции сервера, а не пропускаем сборку индекса.
+    function resolveActiveSectionKeys() {
+        var picked = getSections();
+        if (picked.length) return Promise.resolve(picked);
+        return Api.sections().then(function (all) { return all.map(function (s) { return s.key; }); });
+    }
+
     function fetchAllSectionItems(sectionKey, onPage) {
         var pageSize = 200;
 
@@ -229,38 +238,42 @@
         if (_tmdbIndexRebuildInProgress) return Promise.resolve();
         if (!isConfigured()) return Promise.resolve();
 
-        var sectionKeys = getSections();
-        if (!sectionKeys.length) return Promise.resolve();
-
         _tmdbIndexRebuildInProgress = true;
 
-        var map = {};
-        var chain = sectionKeys.reduce(function (prev, sectionKey) {
-            return prev.then(function () {
-                return fetchAllSectionItems(sectionKey, function (items) {
-                    items.forEach(function (item) {
-                        var tmdbId = findTmdbId(item);
-                        if (!tmdbId) return;
-                        var method = item.type === 'show' ? 'tv' : 'movie';
-                        map[method + ':' + tmdbId] = { ratingKey: item.ratingKey };
+        return resolveActiveSectionKeys().then(function (sectionKeys) {
+            if (!sectionKeys.length) { _tmdbIndexRebuildInProgress = false; return; }
+
+            var map = {};
+            var chain = sectionKeys.reduce(function (prev, sectionKey) {
+                return prev.then(function () {
+                    return fetchAllSectionItems(sectionKey, function (items) {
+                        items.forEach(function (item) {
+                            var tmdbId = findTmdbId(item);
+                            if (!tmdbId) return;
+                            var method = item.type === 'show' ? 'tv' : 'movie';
+                            map[method + ':' + tmdbId] = { ratingKey: item.ratingKey };
+                        });
                     });
                 });
-            });
-        }, Promise.resolve());
+            }, Promise.resolve());
 
-        return chain.then(function () {
-            _plexTmdbIndex = map;
-            setStoredTmdbIndex(map);
-            if (opts.notify) Lampa.Noty.show('Кэш медиатеки Plex обновлён: ' + Object.keys(map).length + ' наименований');
+            return chain.then(function () {
+                _plexTmdbIndex = map;
+                setStoredTmdbIndex(map);
+                if (opts.notify) Lampa.Noty.show('Кэш медиатеки Plex обновлён: ' + Object.keys(map).length + ' наименований');
+            }).catch(function () {
+                if (opts.notify) Lampa.Noty.show('Не удалось обновить кэш медиатеки Plex');
+            }).then(function () {
+                _tmdbIndexRebuildInProgress = false;
+            });
         }).catch(function () {
-            if (opts.notify) Lampa.Noty.show('Не удалось обновить кэш медиатеки Plex');
-        }).then(function () {
             _tmdbIndexRebuildInProgress = false;
+            if (opts.notify) Lampa.Noty.show('Не удалось обновить кэш медиатеки Plex');
         });
     }
 
     function maybeAutoRebuildTmdbIndex() {
-        if (!isConfigured() || !getSections().length) return;
+        if (!isConfigured()) return;
         var age = Date.now() - getTmdbIndexUpdatedAt();
         if (age > TMDB_INDEX_STALE_MS) rebuildTmdbIndex({ notify: false });
     }

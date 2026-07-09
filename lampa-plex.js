@@ -441,7 +441,8 @@
     }
 
     function resetSettings() {
-        ['plex_server_url', 'plex_token', 'plex_sections_selected', 'plex_sync_enabled', 'plex_tmdb_index', 'plex_tmdb_index_updated_at'].forEach(function (k) {
+        restorePlexPriorityIfNeeded();
+        ['plex_server_url', 'plex_token', 'plex_sections_selected', 'plex_sync_enabled', 'plex_tmdb_index', 'plex_tmdb_index_updated_at', 'plex_prev_btn_priority'].forEach(function (k) {
             Lampa.Storage.set(k, '');
         });
         _plexTmdbIndex = {};
@@ -905,6 +906,20 @@
     // Гибридная интеграция с родной карточкой (кнопка "Смотреть в Plex")
     // ---------------------------------------------------------------------
 
+    // Хэш нашей кнопки — тем же алгоритмом и с той же нормализацией
+    // (Lampa.Utils.hash от outerHTML без класса focus), которым родной
+    // components/full/start/buttons.js сопоставляет Storage-ключ
+    // 'full_btn_priority' с конкретной кнопкой в .buttons--container.
+    // Разметка кнопки статична, поэтому хэш одинаков для любой карточки —
+    // считаем один раз и кэшируем.
+    var _plexButtonHash = null;
+    function plexButtonHash() {
+        if (_plexButtonHash) return _plexButtonHash;
+        var probe = $('<div class="full-start__button selector plex-watch-btn">' + PLEX_ICON + '<span>Смотреть в Plex</span></div>');
+        _plexButtonHash = Lampa.Utils.hash(probe.clone().removeClass('focus').prop('outerHTML'));
+        return _plexButtonHash;
+    }
+
     function initFullCardHook() {
         Lampa.Listener.follow('full', function (e) {
             if (e.type !== 'complite') return;
@@ -912,39 +927,61 @@
 
             var method = e.object.method === 'tv' ? 'tv' : 'movie';
             var match = _plexTmdbIndex[method + ':' + e.data.id];
-            if (!match) return;
 
-            injectPlexButton(e, match, method);
+            if (match) injectPlexButton(e, match, method);
+            else restorePlexPriorityIfNeeded();
         });
+    }
+
+    // Автозакрепление «Смотреть в Plex» через штатный механизм Lampa
+    // (Storage 'full_btn_priority' + native onGroupButtons в buttons.js),
+    // с сохранением и восстановлением того, что было закреплено раньше
+    // (или ничего) — для карточек, которых нет в Plex.
+    function pinPlexAsDefaultSource() {
+        var hash = plexButtonHash();
+        var current = Lampa.Storage.get('full_btn_priority', '') + '';
+        if (current !== hash) Lampa.Storage.set('plex_prev_btn_priority', current);
+        Lampa.Storage.set('full_btn_priority', hash);
+    }
+
+    function restorePlexPriorityIfNeeded() {
+        var hash = plexButtonHash();
+        var current = Lampa.Storage.get('full_btn_priority', '') + '';
+        if (current !== hash) return; // закреплено не нами — не трогаем
+        Lampa.Storage.set('full_btn_priority', Lampa.Storage.get('plex_prev_btn_priority', '') + '');
     }
 
     // Вставляем кнопку в .buttons--container — тот же контейнер источников,
     // откуда меню «Смотреть» берёт «Торренты»/«Онлайн» (по образцу addAtButton
-    // из LampaTrakt: full-start__button selector + jQuery hover:enter). Это
-    // обычный источник в общем списке — «прикрепить» его отдельной кнопкой на
-    // карточку пользователь может штатным средством Lampa (долгое нажатие на
-    // элемент в списке источников), плагин это поведение не переопределяет.
+    // из LampaTrakt: full-start__button selector + jQuery hover:enter). Затем
+    // закрепляем её штатным механизмом Lampa (см. pinPlexAsDefaultSource) —
+    // порядок важен: это должно случиться синхронно, до того как компонент
+    // full/start.js вызовет emit('groupButtons') сразу после события 'complite'.
     function injectPlexButton(e, match, method) {
         var root = e.object.activity && typeof e.object.activity.render === 'function' ? e.object.activity.render() : null;
-        if (!root || root.find('.plex-watch-btn').length) return;
+        if (!root) return;
 
-        var btnsContainer = root.find('.buttons--container');
-        if (!btnsContainer.length) return;
+        if (!root.find('.plex-watch-btn').length) {
+            var btnsContainer = root.find('.buttons--container');
+            if (!btnsContainer.length) return;
 
-        var btn = $('<div class="full-start__button selector plex-watch-btn">' + PLEX_ICON + '<span>Смотреть в Plex</span></div>');
+            var btn = $('<div class="full-start__button selector plex-watch-btn">' + PLEX_ICON + '<span>Смотреть в Plex</span></div>');
 
-        btn.on('hover:enter', function () {
-            if (method === 'tv') {
-                Api.metadata(match.ratingKey).then(function (meta) { openSeasonPicker(meta); })
-                    .catch(function () { Lampa.Noty.show('Не удалось получить данные Plex'); });
-            } else {
-                playRatingKey(match.ratingKey, e.data);
-            }
-        });
+            btn.on('hover:enter', function () {
+                if (method === 'tv') {
+                    Api.metadata(match.ratingKey).then(function (meta) { openSeasonPicker(meta); })
+                        .catch(function () { Lampa.Noty.show('Не удалось получить данные Plex'); });
+                } else {
+                    playRatingKey(match.ratingKey, e.data);
+                }
+            });
 
-        btnsContainer.append(btn);
+            btnsContainer.append(btn);
 
-        setTimeout(function () { try { Lampa.Controller.collectionSet(root); } catch (err) {} }, 0);
+            setTimeout(function () { try { Lampa.Controller.collectionSet(root); } catch (err) {} }, 0);
+        }
+
+        pinPlexAsDefaultSource();
     }
 
     // ---------------------------------------------------------------------

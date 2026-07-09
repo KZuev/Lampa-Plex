@@ -289,6 +289,219 @@
     }
 
     // ---------------------------------------------------------------------
+    // Интеграция с LampaTrakt (опционально): статусы просмотра из Trakt
+    // вместо Plex в интерфейсе плагина, и обратная запись «просмотрено» в Plex
+    // ---------------------------------------------------------------------
+
+    function traktAvailable() {
+        return !!(window.Lampa && Lampa.SettingsApi && typeof Lampa.SettingsApi.getComponent === 'function' && Lampa.SettingsApi.getComponent('trakt'));
+    }
+
+    function traktStatusEnabled() {
+        return traktAvailable() && Lampa.Storage.get('plex_trakt_status_enabled', false) === true;
+    }
+
+    function getTraktClientId() { return Lampa.Storage.get('trakt_client_id') || ''; }
+
+    // Повторяет разрешение активного слота мультиаккаунта LampaTrakt
+    // (Lampa.Storage 'trakt_accounts' / 'trakt_active_slot'), с откатом на
+    // старое плоское хранилище 'trakt_token' для немигрированных установок —
+    // тот же порядок, что и в multiAccountGetActiveSlot/GetSlot в LampaTrakt.
+    function getTraktActiveToken() {
+        try {
+            var raw = Lampa.Storage.get('trakt_accounts');
+            var slots = Array.isArray(raw) ? raw : JSON.parse(typeof raw === 'string' ? raw : '[]');
+            var activeSlot = parseInt(Lampa.Storage.get('trakt_active_slot') || '0', 10) || 0;
+            var slot = (slots || []).filter(Boolean).filter(function (s) { return s.slot === activeSlot; })[0];
+            if (slot && slot.token) return slot.token;
+        } catch (e) {}
+        return Lampa.Storage.get('trakt_token') || '';
+    }
+
+    function traktConfigured() {
+        return traktAvailable() && !!(getTraktClientId() && getTraktActiveToken());
+    }
+
+    function traktRequest(path, params) {
+        return new Promise(function (resolve, reject) {
+            var clientId = getTraktClientId();
+            var token = getTraktActiveToken();
+            if (!clientId || !token) { reject(new Error('Trakt is not configured')); return; }
+            $.ajax({
+                url: 'https://api.trakt.tv' + path + (params ? '?' + buildQueryString(params) : ''),
+                method: 'GET',
+                dataType: 'json',
+                headers: {
+                    'trakt-api-version': '2',
+                    'trakt-api-key': clientId,
+                    'Authorization': 'Bearer ' + token
+                },
+                timeout: 20000
+            }).done(resolve).fail(reject);
+        });
+    }
+
+    var TRAKT_WATCHED_CACHE_MS = 10 * 60 * 1000;
+    var _traktWatchedIndex = null;
+    var _traktWatchedIndexAt = 0;
+    var _traktWatchedIndexPromise = null;
+
+    // Карта 'movie:<tmdbId>' -> true, 'tv:<tmdbId>' -> {completed, episodes:{'season:episode':true}}.
+    // Разбивка по сериям у Trakt не всегда стабильна (сам LampaTrakt документирует
+    // случаи, когда Trakt переставал её отдавать) — поэтому "completed" для сериала
+    // считается устойчиво, по количеству просмотров относительно вышедших серий
+    // (aired_episodes), а не по наличию точной разбивки.
+    function getTraktWatchedIndex() {
+        if (_traktWatchedIndex && (Date.now() - _traktWatchedIndexAt) < TRAKT_WATCHED_CACHE_MS) {
+            return Promise.resolve(_traktWatchedIndex);
+        }
+        if (_traktWatchedIndexPromise) return _traktWatchedIndexPromise;
+
+        _traktWatchedIndexPromise = Promise.all([
+            traktRequest('/sync/watched/movies', { extended: 'full' }).catch(function () { return []; }),
+            traktRequest('/sync/watched/shows', { extended: 'full' }).catch(function () { return []; })
+        ]).then(function (results) {
+            var map = {};
+            (results[0] || []).forEach(function (m) {
+                var tmdb = m.movie && m.movie.ids && m.movie.ids.tmdb;
+                if (tmdb) map['movie:' + tmdb] = true;
+            });
+            (results[1] || []).forEach(function (s) {
+                var tmdb = s.show && s.show.ids && s.show.ids.tmdb;
+                if (!tmdb) return;
+                var aired = Number((s.show && s.show.aired_episodes) || 0);
+                var plays = Number(s.plays || 0);
+                var episodes = {};
+                (s.seasons || []).forEach(function (season) {
+                    (season.episodes || []).forEach(function (ep) {
+                        if (ep.plays > 0) episodes[season.number + ':' + ep.number] = true;
+                    });
+                });
+                map['tv:' + tmdb] = { completed: aired > 0 && plays >= aired, episodes: episodes };
+            });
+            _traktWatchedIndex = map;
+            _traktWatchedIndexAt = Date.now();
+            _traktWatchedIndexPromise = null;
+            return map;
+        }).catch(function (e) {
+            _traktWatchedIndexPromise = null;
+            throw e;
+        });
+
+        return _traktWatchedIndexPromise;
+    }
+
+    function traktMovieWatched(index, tmdbId) { return !!(index && tmdbId && index['movie:' + tmdbId]); }
+    function traktShowStatus(index, tmdbId) { return (index && tmdbId) ? (index['tv:' + tmdbId] || null) : null; }
+    function traktEpisodeWatched(index, tmdbId, season, episode) {
+        var s = traktShowStatus(index, tmdbId);
+        return !!(s && (s.completed || (s.episodes && s.episodes[season + ':' + episode])));
+    }
+
+    // Текст статуса для карточки/модалки — из Trakt, если включено и доступно,
+    // иначе из собственных полей Plex (viewCount / leafCount+viewedLeafCount).
+    function plexStatusLine(meta) {
+        if (meta.type === 'movie') return meta.viewCount > 0 ? 'Просмотрено' : 'Не просмотрено';
+        var total = Number(meta.leafCount || 0);
+        var watched = Number(meta.viewedLeafCount || 0);
+        if (!total) return '';
+        if (watched >= total) return 'Просмотрено полностью';
+        return watched ? ('Просмотрено серий: ' + watched + ' из ' + total) : 'Не просмотрено';
+    }
+
+    function statusLineForMeta(meta, tmdbId) {
+        if (traktStatusEnabled() && tmdbId) {
+            return getTraktWatchedIndex().then(function (index) {
+                if (meta.type === 'movie') return (traktMovieWatched(index, tmdbId) ? 'Просмотрено' : 'Не просмотрено') + ' (Trakt)';
+                var s = traktShowStatus(index, tmdbId);
+                if (!s) return 'Не просмотрено (Trakt)';
+                if (s.completed) return 'Просмотрено полностью (Trakt)';
+                var count = Object.keys(s.episodes || {}).length;
+                return (count ? ('Просмотрено серий: ' + count) : 'Не просмотрено') + ' (Trakt)';
+            }).catch(function () { return plexStatusLine(meta); });
+        }
+        return Promise.resolve(plexStatusLine(meta));
+    }
+
+    // Массовая односторонняя синхронизация Trakt → Plex: отмечает в Plex как
+    // просмотренные фильмы и ПОЛНОСТЬЮ просмотренные сериалы (все серии) из
+    // истории Trakt. Частично просмотренные сериалы намеренно пропускаются —
+    // без стабильной поэпизодной разбивки от Trakt риск ошибиться слишком велик.
+    // Сопоставление — через уже собранный _plexTmdbIndex, запускается только
+    // вручную (кнопка в настройках с подтверждением), не автоматически.
+    function syncTraktStatusesToPlex() {
+        if (!traktConfigured()) { Lampa.Noty.show('Сначала войдите в Trakt через LampaTrakt'); return Promise.resolve(); }
+        if (!isConfigured()) { Lampa.Noty.show('Сначала настройте подключение к Plex'); return Promise.resolve(); }
+
+        Lampa.Noty.show('Синхронизация статусов Trakt → Plex начата…');
+
+        function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+        function markRatingKey(ratingKey) {
+            return plexRequest('/:/scrobble', { key: ratingKey, identifier: 'com.plexapp.plugins.library' }).catch(function () {});
+        }
+
+        return getTraktWatchedIndex().then(function (index) {
+            var movieKeys = Object.keys(index).filter(function (k) { return k.indexOf('movie:') === 0 && index[k]; });
+            var showKeys = Object.keys(index).filter(function (k) { return k.indexOf('tv:') === 0 && index[k] && index[k].completed; });
+
+            var markedMovies = 0, markedEpisodes = 0, skipped = 0;
+
+            var processMovies = movieKeys.reduce(function (prev, key) {
+                return prev.then(function () {
+                    var match = _plexTmdbIndex[key];
+                    if (!match) { skipped++; return; }
+                    return markRatingKey(match.ratingKey).then(function () { markedMovies++; }).then(function () { return delay(150); });
+                });
+            }, Promise.resolve());
+
+            return processMovies.then(function () {
+                return showKeys.reduce(function (prev, key) {
+                    return prev.then(function () {
+                        var match = _plexTmdbIndex[key];
+                        if (!match) { skipped++; return; }
+                        return Api.children(match.ratingKey).then(function (seasons) {
+                            var realSeasons = seasons.filter(function (s) { return s.type === 'season'; });
+                            return realSeasons.reduce(function (p, season) {
+                                return p.then(function () {
+                                    return Api.children(season.ratingKey).then(function (episodes) {
+                                        var realEpisodes = episodes.filter(function (e) { return e.type === 'episode'; });
+                                        return realEpisodes.reduce(function (pe, ep) {
+                                            return pe.then(function () {
+                                                return markRatingKey(ep.ratingKey).then(function () { markedEpisodes++; }).then(function () { return delay(150); });
+                                            });
+                                        }, Promise.resolve());
+                                    });
+                                });
+                            }, Promise.resolve());
+                        }).catch(function () { skipped++; });
+                    });
+                }, Promise.resolve());
+            }).then(function () {
+                Lampa.Noty.show('Готово: отмечено в Plex — фильмов ' + markedMovies + ', серий ' + markedEpisodes +
+                    (skipped ? (', пропущено (нет в Plex): ' + skipped) : ''));
+            });
+        }).catch(function () {
+            Lampa.Noty.show('Не удалось синхронизировать статусы Trakt → Plex');
+        });
+    }
+
+    function confirmTraktSyncToPlex() {
+        if (!traktConfigured()) { Lampa.Noty.show('Сначала войдите в Trakt через LampaTrakt'); return; }
+        Lampa.Select.show({
+            title: 'Синхронизировать статусы в Plex?',
+            items: [
+                { title: 'Да, начать', action: 'confirm' },
+                { title: 'Отмена', action: 'cancel' }
+            ],
+            onSelect: function (a) {
+                Lampa.Controller.toggle('settings_component');
+                if (a.action === 'confirm') syncTraktStatusesToPlex();
+            },
+            onBack: function () { Lampa.Controller.toggle('settings_component'); }
+        });
+    }
+
+    // ---------------------------------------------------------------------
     // Вход через Plex.tv (PIN / QR) + автообнаружение серверов
     // ---------------------------------------------------------------------
 
@@ -453,7 +666,7 @@
 
     function resetSettings() {
         restorePlexPriorityIfNeeded();
-        ['plex_server_url', 'plex_token', 'plex_sections_selected', 'plex_sync_enabled', 'plex_tmdb_index', 'plex_tmdb_index_updated_at', 'plex_prev_btn_priority'].forEach(function (k) {
+        ['plex_server_url', 'plex_token', 'plex_sections_selected', 'plex_sync_enabled', 'plex_tmdb_index', 'plex_tmdb_index_updated_at', 'plex_prev_btn_priority', 'plex_trakt_status_enabled'].forEach(function (k) {
             Lampa.Storage.set(k, '');
         });
         _plexTmdbIndex = {};
@@ -573,6 +786,21 @@
             component: 'plex',
             param: { name: 'plex_sync_enabled', type: 'trigger', default: true },
             field: { name: 'Отслеживать просмотр в Plex', description: 'Отправлять позицию и статус просмотра на сервер Plex (Direct Play; транскодирование не поддерживается)' }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'plex',
+            param: { name: 'plex_trakt_status_enabled', type: 'trigger', default: false },
+            field: { name: 'Статусы Trakt.TV', description: 'Просмотрено/не просмотрено и прогресс в интерфейсе плагина — из активного аккаунта Trakt (LampaTrakt), а не из Plex' },
+            onRender: function (item) { if (traktAvailable()) item.show(); else item.hide(); }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'plex',
+            param: { name: 'plex_trakt_sync_to_plex', type: 'button' },
+            field: { name: 'Синхронизировать статусы в Plex', description: 'Отметить в Plex как просмотренные фильмы и полностью просмотренные сериалы из истории Trakt. Действие ручное и необратимое без отдельной отметки «не просмотрено» в самом Plex.' },
+            onRender: function (item) { if (traktStatusEnabled()) item.show(); else item.hide(); },
+            onChange: function () { confirmTraktSyncToPlex(); }
         });
 
         sectionHeader('plex_other_section', 'Прочее');
@@ -702,12 +930,14 @@
         Api.metadata(cardStub.plex_rating_key).then(function (meta) {
             var poster = meta.thumb ? plexUrl(meta.thumb) : '';
             var isShow = meta.type === 'show';
+            var tmdbId = findTmdbId(meta);
 
             var html = $(
                 '<div class="about plex-detail">' +
                 (poster ? '<div class="plex-detail__poster"><img src="' + poster + '"></div>' : '') +
                 '<div class="about__text plex-detail__title"><strong>' + escapeHtml(meta.title || '') +
                 (meta.year ? ' (' + meta.year + ')' : '') + '</strong></div>' +
+                '<div class="about__text plex-detail__status"></div>' +
                 '<div class="about__text plex-detail__descr">' + escapeHtml(meta.summary || '') + '</div>' +
                 '<div class="modal__button selector plex-detail__play">' + (isShow ? 'Выбрать серию' : 'Смотреть') + '</div>' +
                 '</div>'
@@ -724,6 +954,10 @@
                     else playRatingKey(meta.ratingKey, { title: meta.title, img: poster });
                 },
                 onBack: function () { Lampa.Modal.close(); Lampa.Controller.toggle('content'); }
+            });
+
+            statusLineForMeta(meta, tmdbId).then(function (text) {
+                html.find('.plex-detail__status').text(text || '');
             });
         }).catch(function () { Lampa.Noty.show('Не удалось получить данные Plex'); });
     }
@@ -745,22 +979,33 @@
         Api.children(season.ratingKey).then(function (children) {
             var episodes = children.filter(function (e) { return e.type === 'episode'; });
             if (!episodes.length) { Lampa.Noty.show('Серии не найдены'); return; }
-            Lampa.Select.show({
-                title: season.title || ('Сезон ' + season.index),
-                items: episodes.map(function (e) {
+
+            var useTrakt = traktStatusEnabled();
+            var showTmdbId = useTrakt ? findTmdbId(showMeta) : null;
+            var traktIndexPromise = (useTrakt && showTmdbId) ? getTraktWatchedIndex().catch(function () { return null; }) : Promise.resolve(null);
+
+            traktIndexPromise.then(function (traktIndex) {
+                function episodeSubtitle(e) {
+                    if (traktIndex) {
+                        var w = traktEpisodeWatched(traktIndex, showTmdbId, season.index, e.index);
+                        return (w ? 'Просмотрено' : '') + (w ? ' (Trakt)' : '');
+                    }
                     var watched = e.viewCount > 0;
                     var progress = (e.viewOffset && e.duration) ? Math.round(e.viewOffset / e.duration * 100) : 0;
-                    return {
-                        title: e.index + '. ' + (e.title || ''),
-                        subtitle: watched ? 'Просмотрено' : (progress ? progress + '%' : ''),
-                        e: e
-                    };
-                }),
-                onSelect: function (a) {
-                    var idx = episodes.indexOf(a.e);
-                    playEpisode(a.e, showMeta, episodes.slice(idx + 1));
-                },
-                onBack: function () { openSeasonPicker(showMeta); }
+                    return watched ? 'Просмотрено' : (progress ? progress + '%' : '');
+                }
+
+                Lampa.Select.show({
+                    title: season.title || ('Сезон ' + season.index),
+                    items: episodes.map(function (e) {
+                        return { title: e.index + '. ' + (e.title || ''), subtitle: episodeSubtitle(e), e: e };
+                    }),
+                    onSelect: function (a) {
+                        var idx = episodes.indexOf(a.e);
+                        playEpisode(a.e, showMeta, episodes.slice(idx + 1));
+                    },
+                    onBack: function () { openSeasonPicker(showMeta); }
+                });
             });
         }).catch(function () { Lampa.Noty.show('Не удалось получить серии'); });
     }
@@ -1022,6 +1267,12 @@
         initFullCardHook();
         initTimelineSync();
         setTimeout(autoRebuildTmdbIndexOnStart, 3000);
+
+        // Показать/скрыть кнопку синхронизации сразу при переключении тумблера,
+        // без необходимости выйти из настроек и зайти обратно.
+        Lampa.Storage.listener.follow('change', function (e) {
+            if (e.name === 'plex_trakt_status_enabled') Lampa.Settings.update();
+        });
     }
 
     if (window.appready) init();

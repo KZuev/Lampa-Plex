@@ -20,15 +20,15 @@
     var ICON_MENU = PLEX_ICON;
     var ICON_SETTINGS = PLEX_ICON;
 
-    // Значок для кнопки "Смотреть в Plex" — крупная стрелка-play из официального
-    // app-иконки Plex (dashboard-icons: rounded square #282a2d + arrow #e5a00d),
-    // здесь монолинейно, только сама стрелка, currentColor — чтобы наследовать
-    // цвет темы/фокуса как остальные значки Lampa, без второго жёсткого цвета.
-    // Белая обводка по краю — фиксированный цвет (не currentColor), чтобы форма
-    // всегда читалась чётким контуром независимо от того, в какой цвет
-    // окрасится заливка.
+    // Значок для кнопки "Смотреть в Plex" — стрелка-play из официального
+    // app-иконки Plex (dashboard-icons: rounded square #282a2d + arrow #e5a00d).
+    // Стрелка — currentColor (наследует цвет темы/фокуса, как остальные значки
+    // Lampa). Вокруг — контур того самого скруглённого квадрата-рамки из
+    // оригинальной иконки, но не залитый, а только обводка фиксированным белым
+    // (не currentColor) по краю, чтобы форма всегда читалась чётко.
     var PLEX_PLAY_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" aria-hidden="true" focusable="false">' +
-        '<path fill="currentColor" stroke="#fff" stroke-width="20" stroke-linejoin="round" d="M256 70H148l108 186-108 186h108l108-186z"/>' +
+        '<rect x="12" y="12" width="488" height="488" rx="76" fill="none" stroke="#fff" stroke-width="24"/>' +
+        '<path fill="currentColor" d="M256 70H148l108 186-108 186h108l108-186z"/>' +
         '</svg>';
 
     // ---------------------------------------------------------------------

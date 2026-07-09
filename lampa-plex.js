@@ -473,16 +473,16 @@
     function statusLineForMeta(meta, tmdbId) {
         if (traktStatusEnabled() && tmdbId) {
             return getTraktWatchedIndex().then(function (index) {
-                if (meta.type === 'movie') return (traktMovieWatched(index, tmdbId) ? 'Просмотрено' : 'Не просмотрено') + ' (Trakt)';
+                if (meta.type === 'movie') return traktMovieWatched(index, tmdbId) ? 'Просмотрено' : 'Не просмотрено';
                 var s = traktShowStatus(index, tmdbId);
-                if (!s) return 'Не просмотрено (Trakt)';
-                if (s.completed) return 'Просмотрено полностью (Trakt)';
+                if (!s) return 'Не просмотрено';
+                if (s.completed) return 'Просмотрено полностью';
                 // Наличие сериала в /sync/watched/shows означает, что просмотрена
                 // хотя бы одна серия; точное число берём из progress-эндпоинта,
                 // т.к. per-episode разбивки в watched-индексе обычно нет.
                 return getTraktShowEpisodeSet(tmdbId).then(function (set) {
                     var count = set ? Object.keys(set).length : 0;
-                    return (count ? ('Просмотрено серий: ' + count) : 'Смотрю') + ' (Trakt)';
+                    return count ? ('Просмотрено серий: ' + count) : 'Смотрю';
                 });
             }).catch(function () { return plexStatusLine(meta); });
         }
@@ -1085,7 +1085,7 @@
             traktEpSetPromise.then(function (traktEpSet) {
                 function episodeSubtitle(e) {
                     if (traktEpSet) {
-                        return traktEpSet[season.index + ':' + e.index] ? 'Просмотрено (Trakt)' : '';
+                        return traktEpSet[season.index + ':' + e.index] ? 'Просмотрено' : '';
                     }
                     var watched = e.viewCount > 0;
                     var progress = (e.viewOffset && e.duration) ? Math.round(e.viewOffset / e.duration * 100) : 0;
@@ -1329,9 +1329,14 @@
                 }
             });
 
+            // Просто добавляем в скрытый .buttons--container. Дальше всё делает
+            // штатная Lampa: onGroupButtons клонирует закреплённую кнопку в
+            // видимый .full-start-new__buttons и сама настраивает навигацию/фокус
+            // (Controller.collectionSet+collectionFocus в Start.toggle). Нельзя
+            // вызывать здесь свой collectionSet — он выполнится ПОСЛЕ штатного и
+            // сбросит коллекцию без восстановления фокуса, из-за чего на Apple TV
+            // пропадала подсветка навигацией.
             btnsContainer.append(btn);
-
-            setTimeout(function () { try { Lampa.Controller.collectionSet(root); } catch (err) {} }, 0);
         }
 
         pinPlexAsDefaultSource();
@@ -1349,7 +1354,7 @@
             '.plex-device-auth{text-align:center}' +
             '.plex-device-auth__qr img{width:220px;height:220px;margin:0 auto 1em;border-radius:.5em}' +
             '.plex-device-auth__code{font-size:1.4em;letter-spacing:.15em}' +
-            '.full-start__button.plex-watch-btn .plex-brand-icon{width:1em;height:1em}' +
+            '.full-start__button.plex-watch-btn svg{width:1.4em;height:1.4em}' +
             '</style>').appendTo('head');
     }
 

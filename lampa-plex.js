@@ -20,6 +20,14 @@
     var ICON_MENU = PLEX_ICON;
     var ICON_SETTINGS = PLEX_ICON;
 
+    // Значок для кнопки "Смотреть в Plex" — крупная стрелка-play из официального
+    // app-иконки Plex (dashboard-icons: rounded square #282a2d + arrow #e5a00d),
+    // здесь монолинейно, только сама стрелка, currentColor — чтобы наследовать
+    // цвет темы/фокуса как остальные значки Lampa, без второго жёсткого цвета.
+    var PLEX_PLAY_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" aria-hidden="true" focusable="false">' +
+        '<path fill="currentColor" d="M256 70H148l108 186-108 186h108l108-186z"/>' +
+        '</svg>';
+
     // ---------------------------------------------------------------------
     // Утилиты
     // ---------------------------------------------------------------------
@@ -915,7 +923,7 @@
     var _plexButtonHash = null;
     function plexButtonHash() {
         if (_plexButtonHash) return _plexButtonHash;
-        var probe = $('<div class="full-start__button selector plex-watch-btn">' + PLEX_ICON + '<span>Смотреть в Plex</span></div>');
+        var probe = $('<div class="full-start__button selector plex-watch-btn">' + PLEX_PLAY_ICON + '<span>Смотреть в Plex</span></div>');
         _plexButtonHash = Lampa.Utils.hash(probe.clone().removeClass('focus').prop('outerHTML'));
         return _plexButtonHash;
     }
@@ -965,7 +973,7 @@
             var btnsContainer = root.find('.buttons--container');
             if (!btnsContainer.length) return;
 
-            var btn = $('<div class="full-start__button selector plex-watch-btn">' + PLEX_ICON + '<span>Смотреть в Plex</span></div>');
+            var btn = $('<div class="full-start__button selector plex-watch-btn">' + PLEX_PLAY_ICON + '<span>Смотреть в Plex</span></div>');
 
             btn.on('hover:enter', function () {
                 if (method === 'tv') {

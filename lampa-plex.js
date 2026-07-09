@@ -206,7 +206,6 @@
     // независимо от того, как пользователь до неё дошёл)
     // ---------------------------------------------------------------------
 
-    var TMDB_INDEX_STALE_MS = 12 * 60 * 60 * 1000; // 12 часов
     var _plexTmdbIndex = getStoredTmdbIndex();
     var _tmdbIndexRebuildInProgress = false;
 
@@ -272,10 +271,10 @@
         });
     }
 
-    function maybeAutoRebuildTmdbIndex() {
+    // Пересобираем при каждом запуске Lampa (тихо, без уведомлений) — не по таймеру устаревания.
+    function autoRebuildTmdbIndexOnStart() {
         if (!isConfigured()) return;
-        var age = Date.now() - getTmdbIndexUpdatedAt();
-        if (age > TMDB_INDEX_STALE_MS) rebuildTmdbIndex({ notify: false });
+        rebuildTmdbIndex({ notify: false });
     }
 
     // ---------------------------------------------------------------------
@@ -921,10 +920,10 @@
 
     // Вставляем кнопку в .buttons--container — тот же контейнер источников,
     // откуда меню «Смотреть» берёт «Торренты»/«Онлайн» (по образцу addAtButton
-    // из LampaTrakt: full-start__button selector + jQuery hover:enter).
-    // Ставим первой и сразу фокусируем — «закреплённый» источник, если фильм/
-    // сериал есть в Plex; если совпадения нет, injectPlexButton вообще не
-    // вызывается и родная «закреплённая» в Lampa кнопка остаётся как есть.
+    // из LampaTrakt: full-start__button selector + jQuery hover:enter). Это
+    // обычный источник в общем списке — «прикрепить» его отдельной кнопкой на
+    // карточку пользователь может штатным средством Lampa (долгое нажатие на
+    // элемент в списке источников), плагин это поведение не переопределяет.
     function injectPlexButton(e, match, method) {
         var root = e.object.activity && typeof e.object.activity.render === 'function' ? e.object.activity.render() : null;
         if (!root || root.find('.plex-watch-btn').length) return;
@@ -943,14 +942,9 @@
             }
         });
 
-        btnsContainer.prepend(btn);
+        btnsContainer.append(btn);
 
-        setTimeout(function () {
-            try {
-                Lampa.Controller.collectionSet(root);
-                Lampa.Controller.collectionFocus(btn[0], root);
-            } catch (err) {}
-        }, 0);
+        setTimeout(function () { try { Lampa.Controller.collectionSet(root); } catch (err) {} }, 0);
     }
 
     // ---------------------------------------------------------------------
@@ -979,7 +973,7 @@
         initMenu();
         initFullCardHook();
         initTimelineSync();
-        setTimeout(maybeAutoRebuildTmdbIndex, 3000);
+        setTimeout(autoRebuildTmdbIndexOnStart, 3000);
     }
 
     if (window.appready) init();

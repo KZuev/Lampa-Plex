@@ -20,7 +20,7 @@
     var ICON_MENU = PLEX_ICON;
     var ICON_SETTINGS = PLEX_ICON;
 
-    // Значок для кнопки "Смотреть в Plex" — стрелка-play из официального
+    // Значок для кнопки "Смотреть из Plex" — стрелка-play из официального
     // app-иконки Plex (dashboard-icons: rounded square #282a2d + arrow #e5a00d).
     // Стрелка — currentColor (наследует цвет темы/фокуса, как остальные значки
     // Lampa). Вокруг — контур того самого скруглённого квадрата-рамки из
@@ -830,7 +830,7 @@
         Lampa.SettingsApi.addParam({
             component: 'plex',
             param: { name: 'plex_rebuild_index', type: 'button' },
-            field: { name: 'Обновить кэш медиатеки', description: 'Нужен, чтобы кнопка «Смотреть в Plex» показывалась на любой карточке фильма/сериала, а не только после захода в «Медиатеку Plex»' },
+            field: { name: 'Обновить кэш медиатеки', description: 'Нужен, чтобы кнопка «Смотреть из Plex» показывалась на любой карточке фильма/сериала, а не только после захода в «Медиатеку Plex»' },
             onRender: function (item) {
                 item.find('.plex-field-status').remove();
                 var updatedAt = getTmdbIndexUpdatedAt();
@@ -1125,18 +1125,30 @@
         return subs;
     }
 
-    function playMeta(meta, cardData, playlistMetas) {
+    // resume (опц.) — { viewOffset, duration } в миллисекундах Plex из того же
+    // элемента списка, по которому пользователь видел прогресс (напр. 54%).
+    // Берём его в приоритете над meta.viewOffset: гарантирует, что позиция
+    // воспроизведения совпадает с показанной и не теряется, если повторный
+    // запрос metadata по какой-то причине вернул элемент без viewOffset.
+    function playMeta(meta, cardData, playlistMetas, resume) {
         var media = meta.Media && meta.Media[0];
         var part = media && media.Part && media.Part[0];
 
         if (!part) { Lampa.Noty.show('Не найден файл для воспроизведения (нужен Direct Play — транскодирование не поддерживается)'); return; }
 
         var hash = timelineHash(meta.ratingKey);
-        var duration = (meta.duration || media.duration || 0) / 1000;
-        var viewOffset = (meta.viewOffset || 0) / 1000;
+        var durationMs = (resume && resume.duration) ? resume.duration : (meta.duration || media.duration || 0);
+        var viewOffsetMs = (resume && resume.viewOffset != null) ? resume.viewOffset : (meta.viewOffset || 0);
+        var duration = durationMs / 1000;
+        var viewOffset = viewOffsetMs / 1000;
         var percent = duration ? Math.min(100, Math.round(viewOffset / duration * 100)) : 0;
 
+        // Пишем позицию в Lampa.Timeline (то же хранилище file_view, что использует
+        // LampaTrakt для восстановления позиции торрентов) и передаём её объектом
+        // timeline в Player.play. Внутренний плеер перематывает по timeline.time;
+        // Android/webOS внешние плееры получают позицию из data.timeline.time.
         Lampa.Timeline.update({ hash: hash, time: viewOffset, duration: duration, percent: percent });
+        var timeline = Lampa.Timeline.view(hash);
 
         var subtitles = buildSubtitles(part);
 
@@ -1144,7 +1156,7 @@
             url: plexUrl(part.key),
             title: meta.grandparentTitle ? (meta.grandparentTitle + ' - ' + meta.title) : meta.title,
             card: cardData,
-            timeline: Lampa.Timeline.view(hash)
+            timeline: timeline
         };
 
         if (subtitles.length) playData.subtitles = subtitles;
@@ -1169,6 +1181,9 @@
     }
 
     function playEpisode(episodeStub, showMeta, nextEpisodeStubs) {
+        // Позиция берётся из самого элемента списка (episodeStub) — это то, что
+        // показано пользователю (напр. 54%), гарантированно с viewOffset.
+        var resume = { viewOffset: episodeStub.viewOffset || 0, duration: episodeStub.duration || 0 };
         Api.metadata(episodeStub.ratingKey).then(function (meta) {
             var poster = meta.thumb ? plexUrl(meta.thumb) : (showMeta.thumb ? plexUrl(showMeta.thumb) : '');
             var cardData = { title: showMeta.title + ' - ' + meta.title, img: poster };
@@ -1176,9 +1191,9 @@
             var upcoming = (nextEpisodeStubs || []).slice(0, 5);
             if (upcoming.length) {
                 Promise.all(upcoming.map(function (e) { return Api.metadata(e.ratingKey).catch(function () { return null; }); }))
-                    .then(function (metas) { playMeta(meta, cardData, metas.filter(Boolean)); });
+                    .then(function (metas) { playMeta(meta, cardData, metas.filter(Boolean), resume); });
             } else {
-                playMeta(meta, cardData);
+                playMeta(meta, cardData, null, resume);
             }
         }).catch(function () { Lampa.Noty.show('Не удалось получить данные серии'); });
     }
@@ -1256,7 +1271,7 @@
     });
 
     // ---------------------------------------------------------------------
-    // Гибридная интеграция с родной карточкой (кнопка "Смотреть в Plex")
+    // Гибридная интеграция с родной карточкой (кнопка "Смотреть из Plex")
     // ---------------------------------------------------------------------
 
     // Хэш нашей кнопки — тем же алгоритмом и с той же нормализацией
@@ -1268,7 +1283,7 @@
     var _plexButtonHash = null;
     function plexButtonHash() {
         if (_plexButtonHash) return _plexButtonHash;
-        var probe = $('<div class="full-start__button selector plex-watch-btn">' + PLEX_PLAY_ICON + '<span>Смотреть в Plex</span></div>');
+        var probe = $('<div class="full-start__button selector plex-watch-btn">' + PLEX_PLAY_ICON + '<span>Смотреть из Plex</span></div>');
         _plexButtonHash = Lampa.Utils.hash(probe.clone().removeClass('focus').prop('outerHTML'));
         return _plexButtonHash;
     }
@@ -1286,7 +1301,7 @@
         });
     }
 
-    // Автозакрепление «Смотреть в Plex» через штатный механизм Lampa
+    // Автозакрепление «Смотреть из Plex» через штатный механизм Lampa
     // (Storage 'full_btn_priority' + native onGroupButtons в buttons.js),
     // с сохранением и восстановлением того, что было закреплено раньше
     // (или ничего) — для карточек, которых нет в Plex.
@@ -1318,7 +1333,7 @@
             var btnsContainer = root.find('.buttons--container');
             if (!btnsContainer.length) return;
 
-            var btn = $('<div class="full-start__button selector plex-watch-btn">' + PLEX_PLAY_ICON + '<span>Смотреть в Plex</span></div>');
+            var btn = $('<div class="full-start__button selector plex-watch-btn">' + PLEX_PLAY_ICON + '<span>Смотреть из Plex</span></div>');
 
             btn.on('hover:enter', function () {
                 if (method === 'tv') {

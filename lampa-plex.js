@@ -1130,47 +1130,56 @@
     // Берём его в приоритете над meta.viewOffset: гарантирует, что позиция
     // воспроизведения совпадает с показанной и не теряется, если повторный
     // запрос metadata по какой-то причине вернул элемент без viewOffset.
-    function playMeta(meta, cardData, playlistMetas, resume) {
-        var media = meta.Media && meta.Media[0];
-        var part = media && media.Part && media.Part[0];
-
-        if (!part) { Lampa.Noty.show('Не найден файл для воспроизведения (нужен Direct Play — транскодирование не поддерживается)'); return; }
-
-        var hash = timelineHash(meta.ratingKey);
-        var durationMs = (resume && resume.duration) ? resume.duration : (meta.duration || media.duration || 0);
-        var viewOffsetMs = (resume && resume.viewOffset != null) ? resume.viewOffset : (meta.viewOffset || 0);
+    // Собирает элемент плейлиста Plex с его позицией (timeline), точно как это
+    // делает нативное воспроизведение торрентов Lampa (interaction/torrent.js):
+    // каждый элемент playlist несёт свой timeline, а воспроизводимый элемент
+    // ОБЯЗАН присутствовать в playlist со своим url — именно оттуда внешний плеер
+    // на Apple TV (tvOS Pro/infuse) берёт стартовую позицию (в URL-схеме её нет).
+    function buildPlexPlaylistItem(m, resume) {
+        var mi = m.Media && m.Media[0];
+        var mp = mi && mi.Part && mi.Part[0];
+        if (!mp) return null;
+        var h = timelineHash(m.ratingKey);
+        var durationMs = (resume && resume.duration) ? resume.duration : (m.duration || mi.duration || 0);
+        var viewOffsetMs = (resume && resume.viewOffset != null) ? resume.viewOffset : (m.viewOffset || 0);
         var duration = durationMs / 1000;
         var viewOffset = viewOffsetMs / 1000;
         var percent = duration ? Math.min(100, Math.round(viewOffset / duration * 100)) : 0;
+        // Пишем позицию и в Lampa.Timeline (хранилище file_view) — как LampaTrakt.
+        Lampa.Timeline.update({ hash: h, time: viewOffset, duration: duration, percent: percent });
+        var subs = buildSubtitles(mp);
+        var item = {
+            title: m.grandparentTitle ? (m.grandparentTitle + ' - ' + m.title) : m.title,
+            url: plexUrl(mp.key),
+            timeline: Lampa.Timeline.view(h)
+        };
+        if (subs.length) item.subtitles = subs;
+        return item;
+    }
 
-        // Пишем позицию в Lampa.Timeline (то же хранилище file_view, что использует
-        // LampaTrakt для восстановления позиции торрентов) и передаём её объектом
-        // timeline в Player.play. Внутренний плеер перематывает по timeline.time;
-        // Android/webOS внешние плееры получают позицию из data.timeline.time.
-        Lampa.Timeline.update({ hash: hash, time: viewOffset, duration: duration, percent: percent });
-        var timeline = Lampa.Timeline.view(hash);
+    function playMeta(meta, cardData, playlistMetas, resume) {
+        var current = buildPlexPlaylistItem(meta, resume);
+        if (!current) { Lampa.Noty.show('Не найден файл для воспроизведения (нужен Direct Play — транскодирование не поддерживается)'); return; }
 
-        var subtitles = buildSubtitles(part);
+        // Плейлист начинается с ТЕКУЩЕГО элемента (его url === playData.url), далее
+        // следующие серии — каждая со своим timeline, чтобы при переходе resume тоже работал.
+        var playlist = [current];
+        (playlistMetas || []).forEach(function (m) {
+            var it = buildPlexPlaylistItem(m);
+            if (it) playlist.push(it);
+        });
 
         var playData = {
-            url: plexUrl(part.key),
-            title: meta.grandparentTitle ? (meta.grandparentTitle + ' - ' + meta.title) : meta.title,
+            url: current.url,
+            title: current.title,
             card: cardData,
-            timeline: timeline
+            timeline: current.timeline,
+            playlist: playlist
         };
 
-        if (subtitles.length) playData.subtitles = subtitles;
+        if (current.subtitles) playData.subtitles = current.subtitles;
 
-        if (playlistMetas && playlistMetas.length) {
-            var playlist = playlistMetas.map(function (m) {
-                var mi = m.Media && m.Media[0];
-                var mp = mi && mi.Part && mi.Part[0];
-                return mp ? { title: m.title, url: plexUrl(mp.key) } : null;
-            }).filter(Boolean);
-            if (playlist.length) playData.playlist = playlist;
-        }
-
-        _activePlexPlayback = { ratingKey: meta.ratingKey, duration: duration };
+        _activePlexPlayback = { ratingKey: meta.ratingKey, duration: (current.timeline && current.timeline.duration) || 0 };
 
         Lampa.Player.play(playData);
     }

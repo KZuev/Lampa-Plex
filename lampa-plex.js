@@ -394,11 +394,30 @@
         });
     }
 
+    function arraysEqualUnordered(a, b) {
+        if (a.length !== b.length) return false;
+        var sa = a.slice().sort();
+        var sb = b.slice().sort();
+        for (var i = 0; i < sa.length; i++) if (sa[i] !== sb[i]) return false;
+        return true;
+    }
+
     function pickSections() {
         if (!isConfigured()) { Lampa.Noty.show('Сначала укажите адрес сервера и токен'); return; }
         Api.sections().then(function (list) {
             var selected = getSections();
             if (!selected.length) selected = list.map(function (s) { return s.key; });
+            var initialSelected = selected.slice();
+
+            function finish() {
+                Lampa.Controller.toggle('settings_component');
+                // Пересобираем индекс, только если набор реально изменился —
+                // иначе просто открыли/закрыли экран без обновления кэша и без уведомления.
+                if (!arraysEqualUnordered(selected, initialSelected)) {
+                    setSections(selected);
+                    rebuildTmdbIndex({ notify: true });
+                }
+            }
 
             function render() {
                 var items = list.map(function (s) {
@@ -410,21 +429,12 @@
                     title: 'Библиотеки Plex',
                     items: items,
                     onSelect: function (a) {
-                        if (a.done) {
-                            setSections(selected);
-                            Lampa.Controller.toggle('settings_component');
-                            rebuildTmdbIndex({ notify: true });
-                            return;
-                        }
+                        if (a.done) { finish(); return; }
                         var idx = selected.indexOf(a.key);
                         if (idx >= 0) selected.splice(idx, 1); else selected.push(a.key);
                         render();
                     },
-                    onBack: function () {
-                        setSections(selected);
-                        Lampa.Controller.toggle('settings_component');
-                        rebuildTmdbIndex({ notify: true });
-                    }
+                    onBack: function () { finish(); }
                 });
             }
             render();

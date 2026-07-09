@@ -347,6 +347,25 @@
         return e.message || String(e);
     }
 
+    // Trakt пагинирует /sync/watched/* по 100 элементов на страницу (проверено:
+    // ровно 100/100 в ответе; LampaTrakt столкнулся с тем же, их changelog v3.2.39).
+    // Дочитываем все страницы, иначе всё, что за пределами первой сотни, читается
+    // как «не просмотрено». Стоп: короткая страница / пусто / предохранитель 50 стр.
+    function traktGetAllPages(path, extraParams) {
+        var pageSize = 100;
+        var all = [];
+        function step(page) {
+            var params = extend({ page: page, limit: pageSize }, extraParams || {});
+            return traktRequest(path, params).then(function (data) {
+                var arr = Array.isArray(data) ? data : [];
+                all = all.concat(arr);
+                if (arr.length >= pageSize && page < 50) return step(page + 1);
+                return all;
+            });
+        }
+        return step(1);
+    }
+
     var TRAKT_WATCHED_CACHE_MS = 10 * 60 * 1000;
     var _traktWatchedIndex = null;
     var _traktWatchedIndexAt = 0;
@@ -356,11 +375,11 @@
     // не тот client_id и т.п.), а не молча падать обратно на Plex без следа.
     var _traktLastFetch = { at: 0, ok: null, error: '' };
 
-    // Карта 'movie:<tmdbId>' -> true, 'tv:<tmdbId>' -> {completed, episodes:{'season:episode':true}}.
-    // Разбивка по сериям у Trakt не всегда стабильна (сам LampaTrakt документирует
-    // случаи, когда Trakt переставал её отдавать) — поэтому "completed" для сериала
-    // считается устойчиво, по количеству просмотров относительно вышедших серий
-    // (aired_episodes), а не по наличию точной разбивки.
+    // Карта 'movie:<tmdbId>' -> true, 'tv:<tmdbId>' -> {completed, traktId, episodes:{...}}.
+    // Разбивка по сериям у Trakt в /sync/watched/shows нестабильна (LampaTrakt
+    // документирует, что Trakt перестал её отдавать, v3.2.38) — поэтому "completed"
+    // считается устойчиво по plays >= aired_episodes, а точный per-episode статус
+    // берётся отдельно из /shows/{traktId}/progress/watched (getTraktShowEpisodeSet).
     function getTraktWatchedIndex() {
         if (_traktWatchedIndex && (Date.now() - _traktWatchedIndexAt) < TRAKT_WATCHED_CACHE_MS) {
             return Promise.resolve(_traktWatchedIndex);
@@ -368,8 +387,8 @@
         if (_traktWatchedIndexPromise) return _traktWatchedIndexPromise;
 
         _traktWatchedIndexPromise = Promise.all([
-            traktRequest('/sync/watched/movies', { extended: 'full' }),
-            traktRequest('/sync/watched/shows', { extended: 'full' })
+            traktGetAllPages('/sync/watched/movies', { extended: 'full' }),
+            traktGetAllPages('/sync/watched/shows', { extended: 'full' })
         ]).then(function (results) {
             var map = {};
             (results[0] || []).forEach(function (m) {
@@ -381,13 +400,10 @@
                 if (!tmdb) return;
                 var aired = Number((s.show && s.show.aired_episodes) || 0);
                 var plays = Number(s.plays || 0);
-                var episodes = {};
-                (s.seasons || []).forEach(function (season) {
-                    (season.episodes || []).forEach(function (ep) {
-                        if (ep.plays > 0) episodes[season.number + ':' + ep.number] = true;
-                    });
-                });
-                map['tv:' + tmdb] = { completed: aired > 0 && plays >= aired, episodes: episodes };
+                map['tv:' + tmdb] = {
+                    completed: aired > 0 && plays >= aired,
+                    traktId: (s.show && s.show.ids && s.show.ids.trakt) || null
+                };
             });
             _traktWatchedIndex = map;
             _traktWatchedIndexAt = Date.now();
@@ -405,9 +421,42 @@
 
     function traktMovieWatched(index, tmdbId) { return !!(index && tmdbId && index['movie:' + tmdbId]); }
     function traktShowStatus(index, tmdbId) { return (index && tmdbId) ? (index['tv:' + tmdbId] || null) : null; }
-    function traktEpisodeWatched(index, tmdbId, season, episode) {
-        var s = traktShowStatus(index, tmdbId);
-        return !!(s && (s.completed || (s.episodes && s.episodes[season + ':' + episode])));
+
+    // Точный per-episode статус для конкретного сериала: /sync/watched/shows не
+    // отдаёт разбивку по сериям, поэтому берём её из /shows/{traktId}/progress/watched
+    // (там есть seasons[].episodes[].completed). Резолвим tmdbId → traktId сначала
+    // из уже собранного watched-индекса, иначе через /search/tmdb/{id}?type=show.
+    // Результат — множество ключей 'season:episode'. Кэш в памяти, TTL как у индекса.
+    var _traktEpisodeSetCache = {};
+    function getTraktShowEpisodeSet(tmdbId) {
+        if (!tmdbId) return Promise.resolve(null);
+        var cached = _traktEpisodeSetCache[tmdbId];
+        if (cached && (Date.now() - cached.at) < TRAKT_WATCHED_CACHE_MS) return Promise.resolve(cached.set);
+
+        function resolveTraktId() {
+            return getTraktWatchedIndex().then(function (index) {
+                var s = traktShowStatus(index, tmdbId);
+                if (s && s.traktId) return s.traktId;
+                return traktRequest('/search/tmdb/' + tmdbId, { type: 'show' }).then(function (res) {
+                    var first = Array.isArray(res) ? res[0] : null;
+                    return (first && first.show && first.show.ids && first.show.ids.trakt) || null;
+                });
+            });
+        }
+
+        return resolveTraktId().then(function (traktId) {
+            if (!traktId) return null;
+            return traktRequest('/shows/' + traktId + '/progress/watched', { hidden: false, specials: false, count_specials: false }).then(function (prog) {
+                var set = {};
+                ((prog && prog.seasons) || []).forEach(function (season) {
+                    (season.episodes || []).forEach(function (ep) {
+                        if (ep.completed) set[season.number + ':' + ep.number] = true;
+                    });
+                });
+                _traktEpisodeSetCache[tmdbId] = { at: Date.now(), set: set };
+                return set;
+            });
+        }).catch(function () { return null; });
     }
 
     // Текст статуса для карточки/модалки — из Trakt, если включено и доступно,
@@ -428,8 +477,13 @@
                 var s = traktShowStatus(index, tmdbId);
                 if (!s) return 'Не просмотрено (Trakt)';
                 if (s.completed) return 'Просмотрено полностью (Trakt)';
-                var count = Object.keys(s.episodes || {}).length;
-                return (count ? ('Просмотрено серий: ' + count) : 'Не просмотрено') + ' (Trakt)';
+                // Наличие сериала в /sync/watched/shows означает, что просмотрена
+                // хотя бы одна серия; точное число берём из progress-эндпоинта,
+                // т.к. per-episode разбивки в watched-индексе обычно нет.
+                return getTraktShowEpisodeSet(tmdbId).then(function (set) {
+                    var count = set ? Object.keys(set).length : 0;
+                    return (count ? ('Просмотрено серий: ' + count) : 'Смотрю') + ' (Trakt)';
+                });
             }).catch(function () { return plexStatusLine(meta); });
         }
         return Promise.resolve(plexStatusLine(meta));
@@ -1024,13 +1078,14 @@
 
             var useTrakt = traktStatusEnabled();
             var showTmdbId = useTrakt ? findTmdbId(showMeta) : null;
-            var traktIndexPromise = (useTrakt && showTmdbId) ? getTraktWatchedIndex().catch(function () { return null; }) : Promise.resolve(null);
+            // Точный per-episode статус — из /shows/{traktId}/progress/watched (не из
+            // /sync/watched/shows, где разбивки по сериям нет). null → откат на Plex.
+            var traktEpSetPromise = (useTrakt && showTmdbId) ? getTraktShowEpisodeSet(showTmdbId) : Promise.resolve(null);
 
-            traktIndexPromise.then(function (traktIndex) {
+            traktEpSetPromise.then(function (traktEpSet) {
                 function episodeSubtitle(e) {
-                    if (traktIndex) {
-                        var w = traktEpisodeWatched(traktIndex, showTmdbId, season.index, e.index);
-                        return (w ? 'Просмотрено' : '') + (w ? ' (Trakt)' : '');
+                    if (traktEpSet) {
+                        return traktEpSet[season.index + ':' + e.index] ? 'Просмотрено (Trakt)' : '';
                     }
                     var watched = e.viewCount > 0;
                     var progress = (e.viewOffset && e.duration) ? Math.round(e.viewOffset / e.duration * 100) : 0;

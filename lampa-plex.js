@@ -398,6 +398,7 @@
         if (!isConfigured()) { Lampa.Noty.show('Сначала укажите адрес сервера и токен'); return; }
         Api.sections().then(function (list) {
             var selected = getSections();
+            if (!selected.length) selected = list.map(function (s) { return s.key; });
 
             function render() {
                 var items = list.map(function (s) {
@@ -911,6 +912,9 @@
     // Вставляем кнопку в .buttons--container — тот же контейнер источников,
     // откуда меню «Смотреть» берёт «Торренты»/«Онлайн» (по образцу addAtButton
     // из LampaTrakt: full-start__button selector + jQuery hover:enter).
+    // Ставим первой и сразу фокусируем — «закреплённый» источник, если фильм/
+    // сериал есть в Plex; если совпадения нет, injectPlexButton вообще не
+    // вызывается и родная «закреплённая» в Lampa кнопка остаётся как есть.
     function injectPlexButton(e, match, method) {
         var root = e.object.activity && typeof e.object.activity.render === 'function' ? e.object.activity.render() : null;
         if (!root || root.find('.plex-watch-btn').length) return;
@@ -929,9 +933,14 @@
             }
         });
 
-        btnsContainer.append(btn);
+        btnsContainer.prepend(btn);
 
-        setTimeout(function () { try { Lampa.Controller.collectionSet(root); } catch (err) {} }, 0);
+        setTimeout(function () {
+            try {
+                Lampa.Controller.collectionSet(root);
+                Lampa.Controller.collectionFocus(btn[0], root);
+            } catch (err) {}
+        }, 0);
     }
 
     // ---------------------------------------------------------------------

@@ -75,6 +75,16 @@
 
     function syncEnabled() { return Lampa.Storage.get('plex_sync_enabled', true) !== false; }
 
+    function getStoredTmdbIndex() {
+        var v = Lampa.Storage.get('plex_tmdb_index', {});
+        return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    }
+    function setStoredTmdbIndex(map) {
+        Lampa.Storage.set('plex_tmdb_index', JSON.stringify(map || {}));
+        Lampa.Storage.set('plex_tmdb_index_updated_at', Date.now());
+    }
+    function getTmdbIndexUpdatedAt() { return Number(Lampa.Storage.get('plex_tmdb_index_updated_at', 0)) || 0; }
+
     // ---------------------------------------------------------------------
     // Низкоуровневые запросы: Plex Media Server и plex.tv
     // ---------------------------------------------------------------------
@@ -190,6 +200,70 @@
             });
         }
     };
+
+    // ---------------------------------------------------------------------
+    // Индекс медиатеки: tmdbId → Plex ratingKey (для кнопки на родной карточке
+    // независимо от того, как пользователь до неё дошёл)
+    // ---------------------------------------------------------------------
+
+    var TMDB_INDEX_STALE_MS = 12 * 60 * 60 * 1000; // 12 часов
+    var _plexTmdbIndex = getStoredTmdbIndex();
+    var _tmdbIndexRebuildInProgress = false;
+
+    function fetchAllSectionItems(sectionKey, onPage) {
+        var pageSize = 200;
+
+        function step(start) {
+            return Api.list(sectionKey, { start: start, size: pageSize }).then(function (data) {
+                onPage(data.items);
+                var next = start + pageSize;
+                if (data.items.length && next < data.totalSize) return step(next);
+            });
+        }
+
+        return step(0);
+    }
+
+    function rebuildTmdbIndex(opts) {
+        opts = opts || {};
+        if (_tmdbIndexRebuildInProgress) return Promise.resolve();
+        if (!isConfigured()) return Promise.resolve();
+
+        var sectionKeys = getSections();
+        if (!sectionKeys.length) return Promise.resolve();
+
+        _tmdbIndexRebuildInProgress = true;
+
+        var map = {};
+        var chain = sectionKeys.reduce(function (prev, sectionKey) {
+            return prev.then(function () {
+                return fetchAllSectionItems(sectionKey, function (items) {
+                    items.forEach(function (item) {
+                        var tmdbId = findTmdbId(item);
+                        if (!tmdbId) return;
+                        var method = item.type === 'show' ? 'tv' : 'movie';
+                        map[method + ':' + tmdbId] = { ratingKey: item.ratingKey };
+                    });
+                });
+            });
+        }, Promise.resolve());
+
+        return chain.then(function () {
+            _plexTmdbIndex = map;
+            setStoredTmdbIndex(map);
+            if (opts.notify) Lampa.Noty.show('Кэш медиатеки Plex обновлён: ' + Object.keys(map).length + ' наименований');
+        }).catch(function () {
+            if (opts.notify) Lampa.Noty.show('Не удалось обновить кэш медиатеки Plex');
+        }).then(function () {
+            _tmdbIndexRebuildInProgress = false;
+        });
+    }
+
+    function maybeAutoRebuildTmdbIndex() {
+        if (!isConfigured() || !getSections().length) return;
+        var age = Date.now() - getTmdbIndexUpdatedAt();
+        if (age > TMDB_INDEX_STALE_MS) rebuildTmdbIndex({ notify: false });
+    }
 
     // ---------------------------------------------------------------------
     // Вход через Plex.tv (PIN / QR) + автообнаружение серверов
@@ -322,12 +396,21 @@
                     title: 'Библиотеки Plex',
                     items: items,
                     onSelect: function (a) {
-                        if (a.done) { setSections(selected); Lampa.Controller.toggle('settings_component'); return; }
+                        if (a.done) {
+                            setSections(selected);
+                            Lampa.Controller.toggle('settings_component');
+                            rebuildTmdbIndex({ notify: true });
+                            return;
+                        }
                         var idx = selected.indexOf(a.key);
                         if (idx >= 0) selected.splice(idx, 1); else selected.push(a.key);
                         render();
                     },
-                    onBack: function () { setSections(selected); Lampa.Controller.toggle('settings_component'); }
+                    onBack: function () {
+                        setSections(selected);
+                        Lampa.Controller.toggle('settings_component');
+                        rebuildTmdbIndex({ notify: true });
+                    }
                 });
             }
             render();
@@ -335,9 +418,10 @@
     }
 
     function resetSettings() {
-        ['plex_server_url', 'plex_token', 'plex_sections_selected', 'plex_sync_enabled'].forEach(function (k) {
+        ['plex_server_url', 'plex_token', 'plex_sections_selected', 'plex_sync_enabled', 'plex_tmdb_index', 'plex_tmdb_index_updated_at'].forEach(function (k) {
             Lampa.Storage.set(k, '');
         });
+        _plexTmdbIndex = {};
         Lampa.Noty.show('Настройки Plex сброшены');
         Lampa.Settings.update();
     }
@@ -427,6 +511,25 @@
             param: { name: 'plex_pick_sections', type: 'button' },
             field: { name: 'Выбрать библиотеки', description: 'Какие разделы Plex показывать в «Медиатеке Plex»' },
             onChange: function () { pickSections(); }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'plex',
+            param: { name: 'plex_rebuild_index', type: 'button' },
+            field: { name: 'Обновить кэш медиатеки', description: 'Нужен, чтобы кнопка «Смотреть в Plex» показывалась на любой карточке фильма/сериала, а не только после захода в «Медиатеку Plex»' },
+            onRender: function (item) {
+                item.find('.plex-field-status').remove();
+                var updatedAt = getTmdbIndexUpdatedAt();
+                var count = Object.keys(_plexTmdbIndex).length;
+                var status = updatedAt
+                    ? ('обновлено ' + new Date(updatedAt).toLocaleString() + ', сопоставлено: ' + count)
+                    : 'ещё не собирался';
+                item.append('<div class="settings-param__value plex-field-status" style="font-size:.85em;opacity:.65">' + escapeHtml(status) + '</div>');
+            },
+            onChange: function () {
+                Lampa.Noty.show('Обновляю кэш медиатеки Plex…');
+                rebuildTmdbIndex({ notify: true }).then(function () { Lampa.Settings.update(); });
+            }
         });
 
         sectionHeader('plex_playback_section', 'Воспроизведение');
@@ -519,8 +622,6 @@
     // Карточка → hybrid-роутинг (родная карточка TMDB либо своя модалка)
     // ---------------------------------------------------------------------
 
-    var _plexTmdbMatchCache = {};
-
     function toCard(item, object) {
         var tmdbId = findTmdbId(item);
         var poster = item.thumb ? plexUrl(item.thumb) : '';
@@ -548,7 +649,7 @@
                 card_type: method,
                 id: tmdbId
             });
-            _plexTmdbMatchCache[method + ':' + tmdbId] = { ratingKey: item.ratingKey };
+            _plexTmdbIndex[method + ':' + tmdbId] = { ratingKey: item.ratingKey };
         }
 
         return base;
@@ -787,21 +888,24 @@
             if (!isConfigured() || !e.data || !e.data.id || !e.object) return;
 
             var method = e.object.method === 'tv' ? 'tv' : 'movie';
-            var match = _plexTmdbMatchCache[method + ':' + e.data.id];
+            var match = _plexTmdbIndex[method + ':' + e.data.id];
             if (!match) return;
 
             injectPlexButton(e, match, method);
         });
     }
 
+    // Вставляем кнопку в .buttons--container — тот же контейнер источников,
+    // откуда меню «Смотреть» берёт «Торренты»/«Онлайн» (по образцу addAtButton
+    // из LampaTrakt: full-start__button selector + jQuery hover:enter).
     function injectPlexButton(e, match, method) {
         var root = e.object.activity && typeof e.object.activity.render === 'function' ? e.object.activity.render() : null;
         if (!root || root.find('.plex-watch-btn').length) return;
 
-        var rateLine = root.find('.full-start-new__rate-line');
-        if (!rateLine.length) return;
+        var btnsContainer = root.find('.buttons--container');
+        if (!btnsContainer.length) return;
 
-        var btn = $('<div class="full-start-new__details plex-watch-btn selector"><span>▶ Смотреть в Plex</span></div>');
+        var btn = $('<div class="full-start__button selector plex-watch-btn">' + PLEX_ICON + '<span>Смотреть в Plex</span></div>');
 
         btn.on('hover:enter', function () {
             if (method === 'tv') {
@@ -812,7 +916,7 @@
             }
         });
 
-        rateLine.after(btn);
+        btnsContainer.append(btn);
 
         setTimeout(function () { try { Lampa.Controller.collectionSet(root); } catch (err) {} }, 0);
     }
@@ -829,7 +933,7 @@
             '.plex-device-auth{text-align:center}' +
             '.plex-device-auth__qr img{width:220px;height:220px;margin:0 auto 1em;border-radius:.5em}' +
             '.plex-device-auth__code{font-size:1.4em;letter-spacing:.15em}' +
-            '.full-start-new__details.plex-watch-btn{cursor:pointer}' +
+            '.full-start__button.plex-watch-btn .plex-brand-icon{width:1em;height:1em}' +
             '</style>').appendTo('head');
     }
 
@@ -843,6 +947,7 @@
         initMenu();
         initFullCardHook();
         initTimelineSync();
+        setTimeout(maybeAutoRebuildTmdbIndex, 3000);
     }
 
     if (window.appready) init();

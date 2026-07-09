@@ -326,7 +326,7 @@
         return new Promise(function (resolve, reject) {
             var clientId = getTraktClientId();
             var token = getTraktActiveToken();
-            if (!clientId || !token) { reject(new Error('Trakt is not configured')); return; }
+            if (!clientId || !token) { reject(new Error('Не найдены client_id/токен Trakt в хранилище Lampa')); return; }
             $.ajax({
                 url: 'https://api.trakt.tv' + path + (params ? '?' + buildQueryString(params) : ''),
                 method: 'GET',
@@ -341,10 +341,20 @@
         });
     }
 
+    function describeAjaxError(e) {
+        if (!e) return 'неизвестная ошибка';
+        if (e.status) return 'HTTP ' + e.status + (e.statusText ? ' ' + e.statusText : '');
+        return e.message || String(e);
+    }
+
     var TRAKT_WATCHED_CACHE_MS = 10 * 60 * 1000;
     var _traktWatchedIndex = null;
     var _traktWatchedIndexAt = 0;
     var _traktWatchedIndexPromise = null;
+    // Диагностика последней попытки — показывается в настройках, чтобы не
+    // гадать вслепую, если статусы Trakt не подтягиваются (истёкший токен,
+    // не тот client_id и т.п.), а не молча падать обратно на Plex без следа.
+    var _traktLastFetch = { at: 0, ok: null, error: '' };
 
     // Карта 'movie:<tmdbId>' -> true, 'tv:<tmdbId>' -> {completed, episodes:{'season:episode':true}}.
     // Разбивка по сериям у Trakt не всегда стабильна (сам LampaTrakt документирует
@@ -358,8 +368,8 @@
         if (_traktWatchedIndexPromise) return _traktWatchedIndexPromise;
 
         _traktWatchedIndexPromise = Promise.all([
-            traktRequest('/sync/watched/movies', { extended: 'full' }).catch(function () { return []; }),
-            traktRequest('/sync/watched/shows', { extended: 'full' }).catch(function () { return []; })
+            traktRequest('/sync/watched/movies', { extended: 'full' }),
+            traktRequest('/sync/watched/shows', { extended: 'full' })
         ]).then(function (results) {
             var map = {};
             (results[0] || []).forEach(function (m) {
@@ -382,8 +392,10 @@
             _traktWatchedIndex = map;
             _traktWatchedIndexAt = Date.now();
             _traktWatchedIndexPromise = null;
+            _traktLastFetch = { at: Date.now(), ok: true, error: '', movies: (results[0] || []).length, shows: (results[1] || []).length };
             return map;
         }).catch(function (e) {
+            _traktLastFetch = { at: Date.now(), ok: false, error: describeAjaxError(e) };
             _traktWatchedIndexPromise = null;
             throw e;
         });
@@ -793,6 +805,36 @@
             param: { name: 'plex_trakt_status_enabled', type: 'trigger', default: false },
             field: { name: 'Статусы Trakt.TV', description: 'Просмотрено/не просмотрено и прогресс в интерфейсе плагина — из активного аккаунта Trakt (LampaTrakt), а не из Plex' },
             onRender: function (item) { if (traktAvailable()) item.show(); else item.hide(); }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'plex',
+            param: { name: 'plex_trakt_status_debug', type: 'button' },
+            field: { name: 'Проверить подключение к Trakt' },
+            onRender: function (item) {
+                if (!traktStatusEnabled()) { item.hide(); return; }
+                item.show();
+                item.find('.plex-field-status').remove();
+                var status;
+                if (!traktConfigured()) {
+                    status = 'не найдены client_id/токен Trakt в хранилище Lampa — войдите в LampaTrakt';
+                } else if (_traktLastFetch.ok === true) {
+                    status = 'ок, ' + new Date(_traktLastFetch.at).toLocaleString() + ' — фильмов: ' + _traktLastFetch.movies + ', сериалов: ' + _traktLastFetch.shows;
+                } else if (_traktLastFetch.ok === false) {
+                    status = 'ошибка (' + new Date(_traktLastFetch.at).toLocaleString() + '): ' + _traktLastFetch.error;
+                } else {
+                    status = 'ещё не проверялось — нажмите, чтобы проверить';
+                }
+                item.append('<div class="settings-param__value plex-field-status" style="font-size:.85em;opacity:.65">' + escapeHtml(status) + '</div>');
+            },
+            onChange: function () {
+                Lampa.Noty.show('Проверяю подключение к Trakt…');
+                getTraktWatchedIndex().then(function () {
+                    Lampa.Noty.show('Trakt: подключение успешно');
+                }).catch(function () {
+                    Lampa.Noty.show('Trakt: ошибка подключения — см. статус ниже');
+                }).then(function () { Lampa.Settings.update(); });
+            }
         });
 
         Lampa.SettingsApi.addParam({

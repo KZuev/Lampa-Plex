@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.2.0';
+    var PLUGIN_VERSION = '1.3.0';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -190,10 +190,28 @@
             };
             if (opts.query) params.query = opts.query;
             else params.sort = opts.sort || 'titleSort:asc';
+            if (opts.genre) params.genre = opts.genre;
+            if (opts.country) params.country = opts.country;
 
             return plexRequest(path, params).then(function (mc) {
                 var items = mc.Metadata || [];
                 return { items: items, totalSize: mc.totalSize || mc.size || items.length };
+            });
+        },
+
+        // Значения фильтров, реально встречающиеся в конкретной медиатеке
+        // (штатные Plex-эндпоинты, те же, что использует официальный клиент
+        // для чипов «Жанр»/«Страна») — ключи у каждой медиатеки свои, поэтому
+        // запрашиваются отдельно для каждой выбранной секции.
+        genres: function (sectionKey) {
+            return plexRequest('/library/sections/' + sectionKey + '/genre').then(function (mc) {
+                return (mc.Directory || []).map(function (d) { return { key: d.key, title: d.title }; });
+            });
+        },
+
+        countries: function (sectionKey) {
+            return plexRequest('/library/sections/' + sectionKey + '/country').then(function (mc) {
+                return (mc.Directory || []).map(function (d) { return { key: d.key, title: d.title }; });
             });
         },
 
@@ -229,11 +247,12 @@
         return Api.sections().then(function (all) { return all.map(function (s) { return s.key; }); });
     }
 
-    function fetchAllSectionItems(sectionKey, query, onPage) {
+    function fetchAllSectionItems(sectionKey, query, extra, onPage) {
         var pageSize = 200;
 
         function step(start) {
-            return Api.list(sectionKey, { start: start, size: pageSize, query: query || '' }).then(function (data) {
+            var opts = extend({ start: start, size: pageSize, query: query || '' }, extra || {});
+            return Api.list(sectionKey, opts).then(function (data) {
                 onPage(data.items);
                 var next = start + pageSize;
                 if (data.items.length && next < data.totalSize) return step(next);
@@ -245,18 +264,25 @@
 
     // Полная (без пагинации наружу) выборка одной медиатеки — нужна там, где
     // Plex не даёт единого endpoint для чтения сразу нескольких медиатек
-    // (объединённый просмотр «Все») и приходится собирать/сортировать на
+    // (объединённый просмотр «Все», а также фильтры года/жанра/страны —
+    // сортируем/фильтруем по году на клиенте) и приходится собирать на
     // стороне клиента.
-    function fetchAllItemsFlat(sectionKey, query) {
+    function fetchAllItemsFlat(sectionKey, query, extra) {
         var acc = [];
-        return fetchAllSectionItems(sectionKey, query, function (items) { acc = acc.concat(items); }).then(function () { return acc; });
+        return fetchAllSectionItems(sectionKey, query, extra, function (items) { acc = acc.concat(items); }).then(function () { return acc; });
     }
 
-    function fetchCombinedItems(sectionKeys, query) {
+    // extraResolver(sectionKey) -> params-объект для Api.list (например
+    // {genre: key}) либо null, если у этой медиатеки нет такого значения
+    // фильтра вовсе — тогда медиатека целиком пропускается (гарантированно
+    // ничего не даст).
+    function fetchCombinedItems(sectionKeys, query, extraResolver) {
         var all = [];
         var chain = sectionKeys.reduce(function (prev, key) {
             return prev.then(function () {
-                return fetchAllItemsFlat(key, query).then(function (items) { all = all.concat(items); });
+                var extra = extraResolver ? extraResolver(key) : {};
+                if (!extra) return;
+                return fetchAllItemsFlat(key, query, extra).then(function (items) { all = all.concat(items); });
             });
         }, Promise.resolve());
         return chain.then(function () { return all; });
@@ -275,7 +301,7 @@
             var map = {};
             var chain = sectionKeys.reduce(function (prev, sectionKey) {
                 return prev.then(function () {
-                    return fetchAllSectionItems(sectionKey, '', function (items) {
+                    return fetchAllSectionItems(sectionKey, '', null, function (items) {
                         items.forEach(function (item) {
                             var tmdbId = findTmdbId(item);
                             if (!tmdbId) return;
@@ -1461,21 +1487,62 @@
     }
 
     // ---------------------------------------------------------------------
-    // Сортировка объединённого списка (Plex сам сортирует только внутри
-    // одной медиатеки — при просмотре сразу нескольких сортируем на клиенте)
+    // Сортировка/фильтр по году объединённого списка (Plex сам сортирует и
+    // фильтрует только внутри одной медиатеки — при просмотре сразу
+    // нескольких, а также при сортировке "Случайно" или фильтре по году,
+    // делаем это на клиенте). Набор видов сортировки — как у «Хочу
+    // посмотреть» в LampaTrakt, без вариантов, требующих Trakt VIP
+    // (imdb/tmdb/RT/Metascore/голоса — этих данных и у Plex нет) и без тех,
+    // для которых в Plex попросту нет источника данных: «По позиции» (ручной
+    // порядок в watchlist Trakt), «Популярность» (метрика самого Trakt) и
+    // «В коллекции» (дата добавления в коллекцию Trakt, для Plex не
+    // отличается от «Дата добавления»).
     // ---------------------------------------------------------------------
 
-    var PLEX_SORT_LABELS = { titleSort: 'Название', year: 'Год', addedAt: 'Дата добавления', rating: 'Рейтинг' };
-    var PLEX_SORT_ORDER = ['titleSort', 'year', 'addedAt', 'rating'];
+    var PLEX_SORT_LABELS = {
+        added: 'По дате добавления',
+        title: 'По названию',
+        released: 'По дате выхода',
+        runtime: 'По длительности',
+        random: 'Случайно',
+        percentage: 'По рейтингу',
+        my_rating: 'Моя оценка',
+        watched: 'Просмотрено'
+    };
+    var PLEX_SORT_ORDER = ['added', 'title', 'released', 'runtime', 'random', 'percentage', 'my_rating', 'watched'];
+    // Соответствие полю сортировки Plex (используется, когда можно доверить
+    // сортировку и постраничную загрузку самому серверу — см. ниже).
+    var PLEX_NATIVE_SORT_KEY = {
+        added: 'addedAt',
+        title: 'titleSort',
+        released: 'originallyAvailableAt',
+        runtime: 'duration',
+        percentage: 'rating',
+        my_rating: 'userRating',
+        watched: 'lastViewedAt'
+    };
 
     function plexSortValue(item, field) {
-        if (field === 'year') return Number(item.year || 0);
-        if (field === 'addedAt') return Number(item.addedAt || 0);
-        if (field === 'rating') return Number(item.rating || item.audienceRating || 0);
+        if (field === 'released') return Number((item.originallyAvailableAt || '').slice(0, 4)) || Number(item.year || 0);
+        if (field === 'runtime') return Number(item.duration || 0);
+        if (field === 'percentage') return Number(item.rating || item.audienceRating || 0);
+        if (field === 'my_rating') return Number(item.userRating || 0);
+        if (field === 'watched') return Number(item.lastViewedAt || 0);
+        if (field === 'added') return Number(item.addedAt || 0);
         return (item.titleSort || item.title || '').toLowerCase();
     }
 
+    function shuffleItems(items) {
+        var arr = items.slice();
+        for (var i = arr.length - 1; i > 0; i--) {
+            var j = Math.floor(Math.random() * (i + 1));
+            var tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+        }
+        return arr;
+    }
+
     function sortItems(items, field, order) {
+        if (field === 'random') return shuffleItems(items);
         var sorted = items.slice().sort(function (a, b) {
             var av = plexSortValue(a, field), bv = plexSortValue(b, field);
             if (av < bv) return -1;
@@ -1486,26 +1553,100 @@
         return sorted;
     }
 
+    // Год выпуска — фильтр (не сортировка): либо конкретный год, либо
+    // диапазон вида "2020-2024"/"1920-1969" (границы в любом порядке).
+    function plexYearMatches(item, value) {
+        if (!value) return true;
+        var y = Number(item.year || 0);
+        if (!y) return false;
+        if (value.indexOf('-') > 0) {
+            var parts = value.split('-');
+            var lo = Math.min(Number(parts[0]), Number(parts[1]));
+            var hi = Math.max(Number(parts[0]), Number(parts[1]));
+            return y >= lo && y <= hi;
+        }
+        return y === Number(value);
+    }
+
+    function yearFilterLabel(value) {
+        if (!value) return 'Год';
+        if (value === '1920-1969') return 'до 1970';
+        return value.indexOf('-') > 0 ? value.replace('-', '–') : value;
+    }
+
+    // Портировано из buildYearFilterItems в LampaTrakt (список фильтров года
+    // у «Хочу посмотреть») — те же группы годов, без Lampa.Lang (в этом
+    // плагине нет отдельного слоя переводов, весь текст сразу на русском).
+    function buildYearFilterItems(cur, selectedYear) {
+        var items = [{ title: 'Любой', value: '', selected: !selectedYear }];
+        function push(title, value) { items.push({ title: title, value: value, selected: selectedYear === value }); }
+        var indYears = [];
+        for (var y = cur; y >= 2020; y--) indYears.push(y);
+        var extraGroups = [];
+        while (indYears.length > 7) {
+            var oldest = indYears[indYears.length - 1];
+            var bStart = Math.floor(oldest / 5) * 5;
+            var bEnd = bStart + 4;
+            var full = true;
+            for (var k = bStart; k <= bEnd; k++) { if (indYears.indexOf(k) < 0) { full = false; break; } }
+            if (!full) break;
+            indYears = indYears.filter(function (yy) { return yy < bStart || yy > bEnd; });
+            extraGroups.unshift(bEnd + '-' + bStart);
+        }
+        indYears.forEach(function (yy) { push(String(yy), String(yy)); });
+        extraGroups.forEach(function (v) { push(v.replace('-', '–'), v); });
+        push('2019–2015', '2019-2015');
+        push('2014–2010', '2014-2010');
+        push('2009–2005', '2009-2005');
+        push('2004–2000', '2004-2000');
+        push('1999–1990', '1999-1990');
+        push('1989–1980', '1989-1980');
+        push('1979–1970', '1979-1970');
+        push('до 1970', '1920-1969');
+        return items;
+    }
+
     // ---------------------------------------------------------------------
     // Компонент "Медиатека Plex" (сетка карточек)
     // ---------------------------------------------------------------------
 
-    // Одна медиатека — честная постраничная загрузка и сортировка средствами
-    // Plex (быстро, не тянет всё в память). Несколько медиатек сразу («Все») —
-    // Plex не даёт единого endpoint на объединённый список, поэтому собираем
-    // все страницы всех выбранных медиатек и сортируем/пагинируем на клиенте.
+    // Быстрый путь — одна медиатека, без года/жанра/страны, сортировка не
+    // "Случайно": честная постраничная загрузка и сортировка средствами
+    // самого Plex (не тянет всё в память). Во всех остальных случаях (сразу
+    // несколько медиатек — Plex не даёт единого endpoint на объединённый
+    // список; активен фильтр года — его можно проверить только на клиенте;
+    // сортировка "Случайно") — собираем все страницы через fetchCombinedItems
+    // и сортируем/фильтруем/пагинируем на клиенте.
     function makePlexLibraryComponent(object) {
         if (!object.page) object.page = 1;
         var comp = Lampa.Maker.make('Category', object);
         var page = 1;
         var totalPages = 1;
         var pageSize = 50;
-        var combined = (object.plex_sections || []).length > 1;
+        var sectionKeys = object.plex_sections || [];
+        var sort = object.plex_sort || { field: 'added', order: 'desc' };
+        var forceClientSide = sectionKeys.length > 1 || !!object.plex_year || !!object.plex_genre_title || !!object.plex_country_title || sort.field === 'random';
         var mergedItems = null;
 
-        function serveCombinedPage(pageNum, resolve, reject) {
-            var ready = mergedItems ? Promise.resolve(mergedItems) : fetchCombinedItems(object.plex_sections, object.plex_query || '').then(function (items) {
-                var sort = object.plex_sort || { field: 'titleSort', order: 'asc' };
+        // Жанр/страна — ключи у каждой медиатеки свои (см. Api.genres/countries),
+        // поэтому для каждой секции резолвим её собственный ключ; секция без
+        // такого значения фильтра целиком пропускается (гарантированно пустая).
+        function sectionExtraParams(sectionKey) {
+            var extra = {};
+            if (object.plex_genre_title) {
+                if (!object.plex_genre_by_section || !object.plex_genre_by_section[sectionKey]) return null;
+                extra.genre = object.plex_genre_by_section[sectionKey];
+            }
+            if (object.plex_country_title) {
+                if (!object.plex_country_by_section || !object.plex_country_by_section[sectionKey]) return null;
+                extra.country = object.plex_country_by_section[sectionKey];
+            }
+            return extra;
+        }
+
+        function serveClientSidePage(pageNum, resolve, reject) {
+            var ready = mergedItems ? Promise.resolve(mergedItems) : fetchCombinedItems(sectionKeys, object.plex_query || '', sectionExtraParams).then(function (items) {
+                if (object.plex_year) items = items.filter(function (it) { return plexYearMatches(it, object.plex_year); });
                 mergedItems = sortItems(items, sort.field, sort.order);
                 return mergedItems;
             });
@@ -1518,11 +1659,11 @@
             }).catch(function () { reject(); });
         }
 
-        function serveSectionPage(pageNum, resolve, reject) {
+        function serveServerPage(pageNum, resolve, reject) {
             var opts = { start: (pageNum - 1) * pageSize, size: pageSize, query: object.plex_query || '' };
-            if (!opts.query && object.plex_sort) opts.sort = object.plex_sort.field + ':' + object.plex_sort.order;
+            if (!opts.query) opts.sort = (PLEX_NATIVE_SORT_KEY[sort.field] || 'titleSort') + ':' + sort.order;
 
-            Api.list(object.plex_sections[0], opts).then(function (data) {
+            Api.list(sectionKeys[0], opts).then(function (data) {
                 totalPages = Math.max(1, Math.ceil(data.totalSize / pageSize));
                 var results = data.items.map(toCard);
                 resolve({ results: results, total_pages: totalPages, page: pageNum });
@@ -1530,8 +1671,8 @@
         }
 
         function servePage(pageNum, resolve, reject) {
-            if (combined) serveCombinedPage(pageNum, resolve, reject);
-            else serveSectionPage(pageNum, resolve, reject);
+            if (forceClientSide) serveClientSidePage(pageNum, resolve, reject);
+            else serveServerPage(pageNum, resolve, reject);
         }
 
         comp.use({
@@ -1566,10 +1707,12 @@
 
     // ---------------------------------------------------------------------
     // Компонент "Медиатека Plex" — хаб: объединённый список всех выбранных
-    // медиатек + строка фильтров (медиатека/поиск, сортировка) сверху, по
-    // аналогии с «Хочу посмотреть» из LampaTrakt (свой Controller-стейт для
+    // медиатек + строка фильтров сверху, по образцу «Хочу посмотреть» из
+    // LampaTrakt (те же 5 кнопок в том же порядке — медиатека вместо типа
+    // контента, год, жанр, страна, сортировка; свой Controller-стейт для
     // строки фильтров, переключаемый через onHead/onController у вложенного
-    // Category-компонента).
+    // Category-компонента; цвет активной кнопки — золотой Plex вместо
+    // фиолетового Trakt).
     // ---------------------------------------------------------------------
 
     Lampa.Component.add('plex_hub', function (object) {
@@ -1580,8 +1723,15 @@
         var sections = object.plex_sections_available || [];
         var activeSectionKey = null; // null = «Все»
         var activeQuery = '';
-        var activeSort = { field: 'titleSort', order: 'asc' };
-        var libraryBtn, sortBtn;
+        var activeYear = '';
+        var activeGenreTitle = '';
+        var activeGenreBySection = null;
+        var activeCountryTitle = '';
+        var activeCountryBySection = null;
+        var activeSort = { field: 'added', order: 'desc' };
+        var libraryBtn, yearBtn, genreBtn, countryBtn, sortBtn;
+        var genreOptionsPromise = null;
+        var countryOptionsPromise = null;
 
         function restoreFilters() { Lampa.Controller.toggle(FILTER_CTRL); }
 
@@ -1594,24 +1744,74 @@
             return activeQuery ? (base + ': ' + activeQuery) : base;
         }
 
+        function getYearLabel() { return yearFilterLabel(activeYear); }
+        function getGenreLabel() { return activeGenreTitle || 'Жанр'; }
+        function getCountryLabel() { return activeCountryTitle || 'Страна'; }
+
         function getSortLabel() {
+            if (activeSort.field === 'random') return PLEX_SORT_LABELS.random;
             return PLEX_SORT_LABELS[activeSort.field] + ' ' + (activeSort.order === 'desc' ? '↓' : '↑');
         }
 
-        function updateBtn(btn, label) { btn.find('.plex-hub__filter-label').text(label); }
+        // Золотой цвет Plex (#e5a00d) вместо фиолетового Trakt — тот же
+        // приём подсветки активной кнопки, что и в watchlistHub LampaTrakt.
+        function updateBtn(btn, label, active) {
+            btn.find('.plex-hub__filter-label').text(label);
+            btn.toggleClass('plex-hub__filter--active', !!active);
+            btn.css({
+                'background': active ? 'rgba(229,160,13,.18)' : '',
+                'box-shadow': active ? 'inset 0 0 0 1px rgba(229,160,13,.3)' : '',
+                'border-bottom': active ? '3px solid #e5a00d' : ''
+            });
+        }
 
         function makeBtn(label) {
             var btn = $('<div class="simple-button simple-button--filter selector plex-hub__filter"><div class="plex-hub__filter-label"></div></div>');
             btn.css({ 'justify-content': 'center', 'align-items': 'center', 'height': 'auto', 'border-radius': '1.1em', 'padding': '.7em .9em', 'flex': '1 1 auto', 'box-sizing': 'border-box' });
             btn.find('.plex-hub__filter-label').css({ 'width': '100%', 'text-align': 'center', 'white-space': 'normal', 'word-break': 'break-word', 'line-height': '1.3' });
-            updateBtn(btn, label);
             return btn;
+        }
+
+        // Значения фильтра (жанр/страна), реально существующие хотя бы в
+        // одной из выбранных медиатек — объединяем по названию (ключи у
+        // разных медиатек разные), плюс карта "название → {sectionKey: key}"
+        // для резолва при фактическом запросе. Загружается один раз и
+        // кэшируется на время жизни хаба.
+        function loadFilterOptions(apiMethod) {
+            var bySection = {};
+            var titleSet = {};
+            var titles = [];
+            var chain = sections.reduce(function (prev, s) {
+                return prev.then(function () {
+                    return apiMethod(s.key).then(function (list) {
+                        list.forEach(function (g) {
+                            if (!titleSet[g.title]) { titleSet[g.title] = true; titles.push(g.title); }
+                            bySection[g.title] = bySection[g.title] || {};
+                            bySection[g.title][s.key] = g.key;
+                        });
+                    }).catch(function () {});
+                });
+            }, Promise.resolve());
+            return chain.then(function () {
+                titles.sort(function (a, b) { return a.localeCompare(b, 'ru'); });
+                return { titles: titles, bySection: bySection };
+            });
+        }
+
+        function ensureGenreOptions() {
+            if (!genreOptionsPromise) genreOptionsPromise = loadFilterOptions(Api.genres);
+            return genreOptionsPromise;
+        }
+
+        function ensureCountryOptions() {
+            if (!countryOptionsPromise) countryOptionsPromise = loadFilterOptions(Api.countries);
+            return countryOptionsPromise;
         }
 
         function openSearch() {
             Lampa.Input.edit({ title: activeSectionKey ? ('Поиск: ' + (activeSection() ? activeSection().title : '')) : 'Поиск по всем медиатекам', value: activeQuery, free: true, nosave: true }, function (q) {
                 activeQuery = q || '';
-                updateBtn(libraryBtn, getLibraryLabel());
+                updateBtn(libraryBtn, getLibraryLabel(), true);
                 rebuildView();
                 restoreFilters();
             });
@@ -1628,7 +1828,7 @@
                     if (a.action === 'search') { openSearch(); return; }
                     activeSectionKey = a.key;
                     activeQuery = '';
-                    updateBtn(libraryBtn, getLibraryLabel());
+                    updateBtn(libraryBtn, getLibraryLabel(), true);
                     rebuildView();
                     restoreFilters();
                 },
@@ -1636,9 +1836,65 @@
             });
         }
 
+        function openYearFilter() {
+            var items = buildYearFilterItems(new Date().getFullYear(), activeYear);
+            Lampa.Select.show({
+                title: 'Год выпуска',
+                items: items,
+                onSelect: function (a) {
+                    activeYear = a.value;
+                    updateBtn(yearBtn, getYearLabel(), !!activeYear);
+                    rebuildView();
+                    restoreFilters();
+                },
+                onBack: restoreFilters
+            });
+        }
+
+        function openGenreFilter() {
+            ensureGenreOptions().then(function (opts) {
+                var items = [{ title: 'Любой', value: '', selected: !activeGenreTitle }];
+                opts.titles.forEach(function (t) { items.push({ title: t, value: t, selected: activeGenreTitle === t }); });
+
+                Lampa.Select.show({
+                    title: 'Жанр',
+                    items: items,
+                    onSelect: function (a) {
+                        activeGenreTitle = a.value;
+                        activeGenreBySection = a.value ? (opts.bySection[a.value] || {}) : null;
+                        updateBtn(genreBtn, getGenreLabel(), !!activeGenreTitle);
+                        rebuildView();
+                        restoreFilters();
+                    },
+                    onBack: restoreFilters
+                });
+            }).catch(function () { Lampa.Noty.show('Не удалось получить жанры Plex'); restoreFilters(); });
+        }
+
+        function openCountryFilter() {
+            ensureCountryOptions().then(function (opts) {
+                var items = [{ title: 'Любая', value: '', selected: !activeCountryTitle }];
+                opts.titles.forEach(function (t) { items.push({ title: t, value: t, selected: activeCountryTitle === t }); });
+
+                Lampa.Select.show({
+                    title: 'Страна',
+                    items: items,
+                    onSelect: function (a) {
+                        activeCountryTitle = a.value;
+                        activeCountryBySection = a.value ? (opts.bySection[a.value] || {}) : null;
+                        updateBtn(countryBtn, getCountryLabel(), !!activeCountryTitle);
+                        rebuildView();
+                        restoreFilters();
+                    },
+                    onBack: restoreFilters
+                });
+            }).catch(function () { Lampa.Noty.show('Не удалось получить страны Plex'); restoreFilters(); });
+        }
+
         function openSortMenu() {
             var items = PLEX_SORT_ORDER.map(function (field) {
-                return { title: PLEX_SORT_LABELS[field] + (activeSort.field === field ? ('  ' + (activeSort.order === 'desc' ? '↓' : '↑')) : ''), field: field };
+                var suffix = (activeSort.field === field && field !== 'random') ? ('  ' + (activeSort.order === 'desc' ? '↓' : '↑')) : '';
+                return { title: PLEX_SORT_LABELS[field] + suffix, field: field, selected: activeSort.field === field };
             });
 
             Lampa.Select.show({
@@ -1647,7 +1903,7 @@
                 onSelect: function (a) {
                     activeSort.order = (activeSort.field === a.field && activeSort.order === 'asc') ? 'desc' : 'asc';
                     activeSort.field = a.field;
-                    updateBtn(sortBtn, getSortLabel());
+                    updateBtn(sortBtn, getSortLabel(), true);
                     rebuildView();
                     restoreFilters();
                 },
@@ -1665,6 +1921,11 @@
                 plex_sections: sectionKeys,
                 plex_query: activeQuery,
                 plex_sort: activeSort,
+                plex_year: activeYear,
+                plex_genre_title: activeGenreTitle,
+                plex_genre_by_section: activeGenreBySection,
+                plex_country_title: activeCountryTitle,
+                plex_country_by_section: activeCountryBySection,
                 onHead: function () { Lampa.Controller.toggle(FILTER_CTRL); }
             }));
             currentView.activity = activity;
@@ -1683,10 +1944,25 @@
 
                 libraryBtn = makeBtn(getLibraryLabel());
                 libraryBtn.on('hover:enter', function () { lastFilterFocus = libraryBtn[0]; openLibraryFilter(); });
+                updateBtn(libraryBtn, getLibraryLabel(), true);
+
+                yearBtn = makeBtn(getYearLabel());
+                yearBtn.on('hover:enter', function () { lastFilterFocus = yearBtn[0]; openYearFilter(); });
+                updateBtn(yearBtn, getYearLabel(), !!activeYear);
+
+                genreBtn = makeBtn(getGenreLabel());
+                genreBtn.on('hover:enter', function () { lastFilterFocus = genreBtn[0]; openGenreFilter(); });
+                updateBtn(genreBtn, getGenreLabel(), !!activeGenreTitle);
+
+                countryBtn = makeBtn(getCountryLabel());
+                countryBtn.on('hover:enter', function () { lastFilterFocus = countryBtn[0]; openCountryFilter(); });
+                updateBtn(countryBtn, getCountryLabel(), !!activeCountryTitle);
+
                 sortBtn = makeBtn(getSortLabel());
                 sortBtn.on('hover:enter', function () { lastFilterFocus = sortBtn[0]; openSortMenu(); });
+                updateBtn(sortBtn, getSortLabel(), true);
 
-                filtersRow.append(libraryBtn, sortBtn);
+                filtersRow.append(libraryBtn, yearBtn, genreBtn, countryBtn, sortBtn);
                 controls.append(filtersRow);
                 html.append(controls, body);
 
@@ -1830,7 +2106,7 @@
             '.full-start__button.plex-watch-btn svg{width:1.4em;height:1.4em}' +
             '.plex-hub{display:flex;flex-direction:column;height:100%}' +
             '.plex-hub__controls{padding:0 3em;margin:1em 0}' +
-            '.plex-hub__filters{display:flex;gap:.6em}' +
+            '.plex-hub__filters{display:flex;flex-wrap:wrap;gap:.6em}' +
             '.plex-hub__body{flex:1 1 auto;min-height:0}' +
             '</style>').appendTo('head');
     }

@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.3.0';
+    var PLUGIN_VERSION = '1.3.1';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1753,23 +1753,17 @@
             return PLEX_SORT_LABELS[activeSort.field] + ' ' + (activeSort.order === 'desc' ? '↓' : '↑');
         }
 
-        // Золотой цвет Plex (#e5a00d) вместо фиолетового Trakt — тот же
-        // приём подсветки активной кнопки, что и в watchlistHub LampaTrakt.
+        // Подсветка активной кнопки/фокуса — целиком через CSS-класс
+        // .plex-hub__filter--active (см. injectStyles), как в LampaTrakt, без
+        // инлайн-стилей: так неактивные кнопки остаются просто текстом, а не
+        // «коробкой».
         function updateBtn(btn, label, active) {
             btn.find('.plex-hub__filter-label').text(label);
             btn.toggleClass('plex-hub__filter--active', !!active);
-            btn.css({
-                'background': active ? 'rgba(229,160,13,.18)' : '',
-                'box-shadow': active ? 'inset 0 0 0 1px rgba(229,160,13,.3)' : '',
-                'border-bottom': active ? '3px solid #e5a00d' : ''
-            });
         }
 
-        function makeBtn(label) {
-            var btn = $('<div class="simple-button simple-button--filter selector plex-hub__filter"><div class="plex-hub__filter-label"></div></div>');
-            btn.css({ 'justify-content': 'center', 'align-items': 'center', 'height': 'auto', 'border-radius': '1.1em', 'padding': '.7em .9em', 'flex': '1 1 auto', 'box-sizing': 'border-box' });
-            btn.find('.plex-hub__filter-label').css({ 'width': '100%', 'text-align': 'center', 'white-space': 'normal', 'word-break': 'break-word', 'line-height': '1.3' });
-            return btn;
+        function makeBtn() {
+            return $('<div class="simple-button simple-button--filter selector plex-hub__filter"><div class="plex-hub__filter-label"></div></div>');
         }
 
         // Значения фильтра (жанр/страна), реально существующие хотя бы в
@@ -2104,10 +2098,20 @@
             '.plex-device-auth__qr img{width:220px;height:220px;margin:0 auto 1em;border-radius:.5em}' +
             '.plex-device-auth__code{font-size:1.4em;letter-spacing:.15em}' +
             '.full-start__button.plex-watch-btn svg{width:1.4em;height:1.4em}' +
+            // Строка фильтров — 1:1 стилевая копия .trakt-watchlist-hub__sorts из
+            // LampaTrakt (flex:1 1 0 + min-width:0 держит все кнопки в ОДНУ строку,
+            // равными долями; принудительно прозрачный фон у нативного
+            // .simple-button--filter>div убирает «коробку» у неактивных кнопок,
+            // оставляя просто текст). Активная кнопка/фокус — в цвете Plex (золото
+            // #e5a00d) вместо фиолетового Trakt.
             '.plex-hub{display:flex;flex-direction:column;height:100%}' +
-            '.plex-hub__controls{padding:0 3em;margin:1em 0}' +
-            '.plex-hub__filters{display:flex;flex-wrap:wrap;gap:.6em}' +
-            '.plex-hub__body{flex:1 1 auto;min-height:0}' +
+            '.plex-hub__controls{padding:.8em 1.5em .2em}' +
+            '.plex-hub__filters{display:flex;flex-wrap:wrap;gap:.55em}' +
+            '.plex-hub__filters .plex-hub__filter{display:flex;justify-content:center;align-items:center;border-radius:1.1em;padding:.7em .9em;flex:1 1 0;min-width:0;height:auto!important;box-sizing:border-box;border-bottom:3px solid transparent;transition:background .2s,border-color .2s}' +
+            '.plex-hub__filters .plex-hub__filter .plex-hub__filter-label,.plex-hub__filters .plex-hub__filter.simple-button--filter>div{width:100%!important;margin-left:0!important;padding:0!important;background:transparent!important;text-align:center!important;white-space:normal!important;overflow:visible!important;line-height:1.3;word-break:break-word;font-weight:600}' +
+            '.plex-hub__filters .plex-hub__filter--active{background:rgba(229,160,13,.18)!important;border-bottom:3px solid #e5a00d;box-shadow:inset 0 0 0 1px rgba(229,160,13,.3)}' +
+            '.plex-hub__filters .plex-hub__filter.focus,.plex-hub__filters .plex-hub__filter.hover{background-color:rgba(255,255,255,.15)!important;color:#fff!important}' +
+            '.plex-hub__body{flex:1;min-height:0}' +
             '</style>').appendTo('head');
     }
 

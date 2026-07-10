@@ -567,6 +567,114 @@
         });
     }
 
+    // ── Отправка просмотра из Plex в Trakt ────────────────────────────────
+    // Токен обновляет сам LampaTrakt (пишет свежий в Storage), мы читаем текущий.
+
+    function traktScrobbleEnabled() {
+        return traktAvailable() && Lampa.Storage.get('plex_trakt_scrobble', false) === true;
+    }
+
+    function traktPost(path, body) {
+        return new Promise(function (resolve, reject) {
+            var clientId = getTraktClientId();
+            var token = getTraktActiveToken();
+            if (!clientId || !token) { reject(new Error('Trakt не настроен')); return; }
+            $.ajax({
+                url: 'https://api.trakt.tv' + path,
+                method: 'POST',
+                data: JSON.stringify(body || {}),
+                contentType: 'application/json',
+                dataType: 'json',
+                headers: {
+                    'trakt-api-version': '2',
+                    'trakt-api-key': clientId,
+                    'Authorization': 'Bearer ' + token
+                },
+                timeout: 20000
+            }).done(resolve).fail(reject);
+        });
+    }
+
+    // trakt identity: { type:'movie', tmdb } | { type:'episode', tmdb:<show>, season, number }
+    function buildTraktHistoryPayload(trakt, watchedAt) {
+        var tmdb = Number(trakt && trakt.tmdb);
+        if (!tmdb) return null;
+        if (trakt.type === 'movie') {
+            return { movies: [{ ids: { tmdb: tmdb }, watched_at: watchedAt }] };
+        }
+        if (trakt.type === 'episode' && trakt.season != null && trakt.number != null) {
+            return { shows: [{ ids: { tmdb: tmdb }, seasons: [{ number: Number(trakt.season), episodes: [{ number: Number(trakt.number), watched_at: watchedAt }] }] }] };
+        }
+        return null;
+    }
+
+    function buildTraktScrobbleBody(trakt, progress) {
+        var tmdb = Number(trakt && trakt.tmdb);
+        if (!tmdb) return null;
+        if (trakt.type === 'movie') return { movie: { ids: { tmdb: tmdb } }, progress: progress };
+        if (trakt.type === 'episode' && trakt.season != null && trakt.number != null) {
+            return { show: { ids: { tmdb: tmdb } }, episode: { season: Number(trakt.season), number: Number(trakt.number) }, progress: progress };
+        }
+        return null;
+    }
+
+    // После отметки в Trakt сбрасываем кэши статусов, чтобы интерфейс плагина
+    // (который читает из Trakt) сразу показал новый статус.
+    function invalidateTraktCaches() {
+        _traktWatchedIndex = null;
+        _traktWatchedIndexAt = 0;
+        _traktEpisodeSetCache = {};
+    }
+
+    // Очередь повторной отправки: если POST не удался (401 от протухшего токена,
+    // нет сети), payload /sync/history сохраняется и до-отправляется при старте —
+    // пересматривать серию не нужно.
+    var TRAKT_QUEUE_KEY = 'plex_trakt_scrobble_queue';
+    function getTraktQueue() {
+        var v = Lampa.Storage.get(TRAKT_QUEUE_KEY, []);
+        return Array.isArray(v) ? v : [];
+    }
+    function setTraktQueue(arr) { Lampa.Storage.set(TRAKT_QUEUE_KEY, JSON.stringify(arr || [])); }
+    function enqueueTraktHistory(payload) {
+        var q = getTraktQueue();
+        q.push(payload);
+        if (q.length > 200) q = q.slice(q.length - 200);
+        setTraktQueue(q);
+    }
+    function flushTraktQueue() {
+        if (!traktScrobbleEnabled() || !traktConfigured()) return;
+        var q = getTraktQueue();
+        if (!q.length) return;
+        setTraktQueue([]); // забираем в работу; неуспешные вернём обратно
+        var failed = [];
+        q.reduce(function (prev, payload) {
+            return prev.then(function () {
+                return traktPost('/sync/history', payload).catch(function () { failed.push(payload); });
+            });
+        }, Promise.resolve()).then(function () {
+            if (failed.length) setTraktQueue(getTraktQueue().concat(failed));
+            else invalidateTraktCaches();
+        });
+    }
+
+    // Вызывается при закрытии плеера: досмотрено до порога → отметка «просмотрено»
+    // в Trakt (/sync/history, с очередью при сбое); ниже порога, но с прогрессом →
+    // /scrobble/pause (best-effort, для resume в Trakt).
+    function reportPlaybackToTrakt(trakt, timeSec, durationSec) {
+        if (!trakt || !traktScrobbleEnabled() || !traktConfigured()) return;
+        var percent = durationSec ? Math.min(100, Math.round(timeSec / durationSec * 100)) : 0;
+        if (percent >= 90) {
+            var payload = buildTraktHistoryPayload(trakt, new Date().toISOString());
+            if (!payload) return;
+            traktPost('/sync/history', payload).then(function () {
+                invalidateTraktCaches();
+            }).catch(function () { enqueueTraktHistory(payload); });
+        } else if (percent >= 2 && timeSec > 30) {
+            var body = buildTraktScrobbleBody(trakt, percent);
+            if (body) traktPost('/scrobble/pause', body).catch(function () {});
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Вход через Plex.tv (PIN / QR) + автообнаружение серверов
     // ---------------------------------------------------------------------
@@ -732,7 +840,7 @@
 
     function resetSettings() {
         restorePlexPriorityIfNeeded();
-        ['plex_server_url', 'plex_token', 'plex_sections_selected', 'plex_sync_enabled', 'plex_tmdb_index', 'plex_tmdb_index_updated_at', 'plex_prev_btn_priority', 'plex_trakt_status_enabled'].forEach(function (k) {
+        ['plex_server_url', 'plex_token', 'plex_sections_selected', 'plex_sync_enabled', 'plex_tmdb_index', 'plex_tmdb_index_updated_at', 'plex_prev_btn_priority', 'plex_trakt_status_enabled', 'plex_trakt_scrobble', 'plex_trakt_scrobble_queue'].forEach(function (k) {
             Lampa.Storage.set(k, '');
         });
         _plexTmdbIndex = {};
@@ -858,6 +966,13 @@
             component: 'plex',
             param: { name: 'plex_trakt_status_enabled', type: 'trigger', default: false },
             field: { name: 'Статусы Trakt.TV', description: 'Просмотрено/не просмотрено и прогресс в интерфейсе плагина — из активного аккаунта Trakt (LampaTrakt), а не из Plex' },
+            onRender: function (item) { if (traktAvailable()) item.show(); else item.hide(); }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'plex',
+            param: { name: 'plex_trakt_scrobble', type: 'trigger', default: false },
+            field: { name: 'Отправлять просмотр в Trakt', description: 'После просмотра через Plex отмечать фильм/серию просмотренными в активном аккаунте Trakt (при досмотре ≥90%; ниже — сохраняется позиция). При сбое отправка повторится при следующем запуске — пересматривать не нужно.' },
             onRender: function (item) { if (traktAvailable()) item.show(); else item.hide(); }
         });
 
@@ -1157,16 +1272,27 @@
         return item;
     }
 
-    function playMeta(meta, cardData, playlistMetas, resume) {
+    function playMeta(meta, cardData, playlistMetas, resume, trakt) {
         var current = buildPlexPlaylistItem(meta, resume);
         if (!current) { Lampa.Noty.show('Не найден файл для воспроизведения (нужен Direct Play — транскодирование не поддерживается)'); return; }
 
         // Плейлист начинается с ТЕКУЩЕГО элемента (его url === playData.url), далее
         // следующие серии — каждая со своим timeline, чтобы при переходе resume тоже работал.
+        // Параллельно ведём tracked — {ratingKey, trakt} по каждому элементу, чтобы
+        // при закрытии плеера отчитаться в Plex/Trakt по КАЖДОЙ реально просмотренной
+        // серии (важно для просмотра «взахлёб» через автопереход по плейлисту).
+        // t0 — стартовая позиция элемента (сек), чтобы при закрытии отчитаться только
+        // по тем, где позиция реально выросла (эту серию в этой сессии смотрели).
         var playlist = [current];
+        var tracked = [{ ratingKey: meta.ratingKey, trakt: trakt || null, t0: (current.timeline && current.timeline.time) || 0 }];
         (playlistMetas || []).forEach(function (m) {
             var it = buildPlexPlaylistItem(m);
-            if (it) playlist.push(it);
+            if (!it) return;
+            playlist.push(it);
+            var nextTrakt = (trakt && trakt.type === 'episode')
+                ? { type: 'episode', tmdb: trakt.tmdb, season: m.parentIndex, number: m.index }
+                : null;
+            tracked.push({ ratingKey: m.ratingKey, trakt: nextTrakt, t0: (it.timeline && it.timeline.time) || 0 });
         });
 
         var playData = {
@@ -1179,13 +1305,13 @@
 
         if (current.subtitles) playData.subtitles = current.subtitles;
 
-        _activePlexPlayback = { ratingKey: meta.ratingKey, duration: (current.timeline && current.timeline.duration) || 0 };
+        _activePlexPlayback = { items: tracked, duration: (current.timeline && current.timeline.duration) || 0 };
 
         Lampa.Player.play(playData);
     }
 
-    function playRatingKey(ratingKey, cardData) {
-        Api.metadata(ratingKey).then(function (meta) { playMeta(meta, cardData); })
+    function playRatingKey(ratingKey, cardData, trakt) {
+        Api.metadata(ratingKey).then(function (meta) { playMeta(meta, cardData, null, null, trakt); })
             .catch(function () { Lampa.Noty.show('Не удалось получить данные для воспроизведения'); });
     }
 
@@ -1193,6 +1319,9 @@
         // Позиция берётся из самого элемента списка (episodeStub) — это то, что
         // показано пользователю (напр. 54%), гарантированно с viewOffset.
         var resume = { viewOffset: episodeStub.viewOffset || 0, duration: episodeStub.duration || 0 };
+        // Идентификатор для Trakt: tmdb сериала (из showMeta) + сезон/номер серии.
+        var showTmdb = findTmdbId(showMeta);
+        var trakt = showTmdb ? { type: 'episode', tmdb: showTmdb, season: episodeStub.parentIndex, number: episodeStub.index } : null;
         Api.metadata(episodeStub.ratingKey).then(function (meta) {
             var poster = meta.thumb ? plexUrl(meta.thumb) : (showMeta.thumb ? plexUrl(showMeta.thumb) : '');
             var cardData = { title: showMeta.title + ' - ' + meta.title, img: poster };
@@ -1200,9 +1329,9 @@
             var upcoming = (nextEpisodeStubs || []).slice(0, 5);
             if (upcoming.length) {
                 Promise.all(upcoming.map(function (e) { return Api.metadata(e.ratingKey).catch(function () { return null; }); }))
-                    .then(function (metas) { playMeta(meta, cardData, metas.filter(Boolean), resume); });
+                    .then(function (metas) { playMeta(meta, cardData, metas.filter(Boolean), resume, trakt); });
             } else {
-                playMeta(meta, cardData, null, resume);
+                playMeta(meta, cardData, null, resume, trakt);
             }
         }).catch(function () { Lampa.Noty.show('Не удалось получить данные серии'); });
     }
@@ -1230,9 +1359,18 @@
             var info = _activePlexPlayback;
             _activePlexPlayback = null;
 
-            var hash = timelineHash(info.ratingKey);
-            var road = Lampa.Timeline.view(hash);
-            reportProgressToPlex(info.ratingKey, road.time, road.duration || info.duration);
+            // Отчитываемся по каждому элементу, который реально трогали (road.time>0):
+            // при бинж-просмотре через плейлист так отметятся все просмотренные серии,
+            // а не только первая. Нетронутые следующие серии (time=0) пропускаются.
+            (info.items || []).forEach(function (it) {
+                var road = Lampa.Timeline.view(timelineHash(it.ratingKey));
+                if (!road || !road.time) return;
+                // Позиция не выросла со старта → серию в этой сессии не смотрели, пропускаем.
+                if (road.time <= (it.t0 || 0) + 1) return;
+                var durSec = road.duration || info.duration;
+                reportProgressToPlex(it.ratingKey, road.time, durSec);
+                reportPlaybackToTrakt(it.trakt, road.time, durSec);
+            });
         });
     }
 
@@ -1349,7 +1487,7 @@
                     Api.metadata(match.ratingKey).then(function (meta) { openSeasonPicker(meta); })
                         .catch(function () { Lampa.Noty.show('Не удалось получить данные Plex'); });
                 } else {
-                    playRatingKey(match.ratingKey, e.data);
+                    playRatingKey(match.ratingKey, e.data, { type: 'movie', tmdb: e.data.id });
                 }
             });
 
@@ -1393,6 +1531,8 @@
         initFullCardHook();
         initTimelineSync();
         setTimeout(autoRebuildTmdbIndexOnStart, 3000);
+        // Досылаем отложенные отметки просмотра в Trakt (те, что не ушли ранее).
+        setTimeout(flushTraktQueue, 5000);
 
         // Показать/скрыть кнопку синхронизации сразу при переключении тумблера,
         // без необходимости выйти из настроек и зайти обратно.

@@ -1,6 +1,6 @@
 /**
  * Lampa-Plex — медиатека личного Plex-сервера внутри Lampa.
- * Показывает библиотеки Plex (фильмы/сериалы) и запускает Direct Play через Lampa.Player,
+ * Показывает медиатеки Plex (фильмы/сериалы) и запускает Direct Play через Lampa.Player,
  * с автоматической передачей во внешний плеер, если так настроено в самой Lampa.
  */
 (function () {
@@ -221,7 +221,7 @@
     var _tmdbIndexRebuildInProgress = false;
 
     // Те же правила, что и у «Медиатека Plex»: если пользователь ни разу не
-    // открывал «Выбрать библиотеки», getSections() пуст — в этом случае
+    // открывал «Выбрать медиатеки», getSections() пуст — в этом случае
     // берём все доступные секции сервера, а не пропускаем сборку индекса.
     function resolveActiveSectionKeys() {
         var picked = getSections();
@@ -833,7 +833,7 @@
                 });
                 items.push({ title: 'Готово', done: true });
                 Lampa.Select.show({
-                    title: 'Библиотеки Plex',
+                    title: 'Медиатеки Plex',
                     items: items,
                     onSelect: function (a) {
                         if (a.done) { finish(); return; }
@@ -845,7 +845,7 @@
                 });
             }
             render();
-        }).catch(function () { Lampa.Noty.show('Не удалось получить список библиотек Plex'); });
+        }).catch(function () { Lampa.Noty.show('Не удалось получить список медиатек Plex'); });
     }
 
     function resetSettings() {
@@ -936,12 +936,12 @@
             onChange: function () { testConnection(); }
         });
 
-        sectionHeader('plex_libraries_section', 'Библиотеки');
+        sectionHeader('plex_libraries_section', 'Медиатеки');
 
         Lampa.SettingsApi.addParam({
             component: 'plex',
             param: { name: 'plex_pick_sections', type: 'button' },
-            field: { name: 'Выбрать библиотеки', description: 'Какие разделы Plex показывать в «Медиатеке Plex»' },
+            field: { name: 'Выбрать медиатеки', description: 'Какие разделы Plex показывать в «Медиатеке Plex»' },
             onChange: function () { pickSections(); }
         });
 
@@ -1055,7 +1055,7 @@
             var chosen = picked.length ? all.filter(function (s) { return picked.indexOf(s.key) >= 0; }) : all;
 
             if (!chosen.length) {
-                Lampa.Noty.show('Не выбраны библиотеки Plex в настройках');
+                Lampa.Noty.show('Не выбраны медиатеки Plex в настройках');
                 Lampa.Controller.toggle('settings');
                 Lampa.Settings.create('plex');
                 return;
@@ -1076,7 +1076,7 @@
         Lampa.Select.show({
             title: section.title,
             items: [
-                { title: 'Открыть библиотеку', action: 'browse' },
+                { title: 'Открыть медиатеку', action: 'browse' },
                 { title: 'Поиск', action: 'search' }
             ],
             onSelect: function (a) {

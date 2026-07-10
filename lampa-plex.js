@@ -574,6 +574,16 @@
         return traktAvailable() && Lampa.Storage.get('plex_trakt_scrobble', false) === true;
     }
 
+    // Порог «досмотрено» берём из настройки самого LampaTrakt (trakt_min_progress),
+    // чтобы Plex и Trakt отмечали просмотренным по одному правилу. Fallback 90.
+    function traktMinProgress() {
+        var value = parseInt(Lampa.Storage.field('trakt_min_progress'), 10);
+        if (isNaN(value)) value = 90;
+        if (value < 1) value = 1;
+        if (value > 100) value = 100;
+        return value;
+    }
+
     function traktPost(path, body) {
         return new Promise(function (resolve, reject) {
             var clientId = getTraktClientId();
@@ -663,7 +673,7 @@
     function reportPlaybackToTrakt(trakt, timeSec, durationSec) {
         if (!trakt || !traktScrobbleEnabled() || !traktConfigured()) return;
         var percent = durationSec ? Math.min(100, Math.round(timeSec / durationSec * 100)) : 0;
-        if (percent >= 90) {
+        if (percent >= traktMinProgress()) {
             var payload = buildTraktHistoryPayload(trakt, new Date().toISOString());
             if (!payload) return;
             traktPost('/sync/history', payload).then(function () {
@@ -972,7 +982,7 @@
         Lampa.SettingsApi.addParam({
             component: 'plex',
             param: { name: 'plex_trakt_scrobble', type: 'trigger', default: false },
-            field: { name: 'Отправлять просмотр в Trakt', description: 'После просмотра через Plex отмечать фильм/серию просмотренными в активном аккаунте Trakt (при досмотре ≥90%; ниже — сохраняется позиция). При сбое отправка повторится при следующем запуске — пересматривать не нужно.' },
+            field: { name: 'Отправлять просмотр в Trakt', description: 'После просмотра через Plex отмечать фильм/серию просмотренными в активном аккаунте Trakt (порог досмотра берётся из настройки LampaTrakt «Порог просмотра»; ниже порога — сохраняется позиция). При сбое отправка повторится при следующем запуске — пересматривать не нужно.' },
             onRender: function (item) { if (traktAvailable()) item.show(); else item.hide(); }
         });
 

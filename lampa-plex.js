@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.3.2';
+    var PLUGIN_VERSION = '1.3.3';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1953,7 +1953,6 @@
                 updateBtn(countryBtn, getCountryLabel(), !!activeCountryTitle);
 
                 sortBtn = makeBtn(getSortLabel());
-                sortBtn.addClass('plex-hub__filter--sort');
                 sortBtn.on('hover:enter', function () { lastFilterFocus = sortBtn[0]; openSortMenu(); });
                 updateBtn(sortBtn, getSortLabel(), true);
 
@@ -2107,10 +2106,9 @@
             // #e5a00d) вместо фиолетового Trakt.
             '.plex-hub{display:flex;flex-direction:column;height:100%}' +
             '.plex-hub__controls{padding:.8em 1.5em .2em}' +
-            '.plex-hub__filters{display:flex;flex-wrap:wrap;align-items:center;gap:.55em}' +
-            '.plex-hub__filters .plex-hub__filter{display:flex;justify-content:center;align-items:center;border-radius:1em;padding:.45em .8em;flex:1 1 0;min-width:0;height:auto!important;box-sizing:border-box;border-bottom:3px solid transparent;transition:background .2s,border-color .2s}' +
-            '.plex-hub__filters .plex-hub__filter--sort{flex:1.9 1 0}' +
-            '.plex-hub__filters .plex-hub__filter .plex-hub__filter-label,.plex-hub__filters .plex-hub__filter.simple-button--filter>div{width:100%!important;margin-left:0!important;padding:0!important;background:transparent!important;text-align:center!important;white-space:normal!important;overflow:visible!important;line-height:1.2;word-break:break-word;font-weight:600;font-size:.9em}' +
+            '.plex-hub__filters{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5em}' +
+            '.plex-hub__filters .plex-hub__filter{display:flex;justify-content:center;align-items:center;border-radius:1em;padding:.45em 1em;flex:0 0 auto;height:auto!important;box-sizing:border-box;border-bottom:3px solid transparent;transition:background .2s,border-color .2s}' +
+            '.plex-hub__filters .plex-hub__filter .plex-hub__filter-label,.plex-hub__filters .plex-hub__filter.simple-button--filter>div{margin-left:0!important;padding:0!important;background:transparent!important;text-align:center!important;white-space:nowrap!important;overflow:visible!important;line-height:1.2;font-weight:600;font-size:.95em}' +
             '.plex-hub__filters .plex-hub__filter--active{background:rgba(229,160,13,.18)!important;border-bottom:3px solid #e5a00d;box-shadow:inset 0 0 0 1px rgba(229,160,13,.3)}' +
             '.plex-hub__filters .plex-hub__filter.focus,.plex-hub__filters .plex-hub__filter.hover{background-color:rgba(255,255,255,.15)!important;color:#fff!important}' +
             '.plex-hub__body{flex:1;min-height:0}' +

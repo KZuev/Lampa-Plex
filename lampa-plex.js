@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.3.3';
+    var PLUGIN_VERSION = '1.3.4';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -2106,9 +2106,9 @@
             // #e5a00d) вместо фиолетового Trakt.
             '.plex-hub{display:flex;flex-direction:column;height:100%}' +
             '.plex-hub__controls{padding:.8em 1.5em .2em}' +
-            '.plex-hub__filters{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5em}' +
-            '.plex-hub__filters .plex-hub__filter{display:flex;justify-content:center;align-items:center;border-radius:1em;padding:.45em 1em;flex:0 0 auto;height:auto!important;box-sizing:border-box;border-bottom:3px solid transparent;transition:background .2s,border-color .2s}' +
-            '.plex-hub__filters .plex-hub__filter .plex-hub__filter-label,.plex-hub__filters .plex-hub__filter.simple-button--filter>div{margin-left:0!important;padding:0!important;background:transparent!important;text-align:center!important;white-space:nowrap!important;overflow:visible!important;line-height:1.2;font-weight:600;font-size:.95em}' +
+            '.plex-hub__filters{display:flex;flex-wrap:nowrap;align-items:center;gap:.5em}' +
+            '.plex-hub__filters .plex-hub__filter{display:flex;justify-content:center;align-items:center;border-radius:1em;padding:.45em .7em;flex:1 1 auto;min-width:0;height:auto!important;box-sizing:border-box;border-bottom:3px solid transparent;transition:background .2s,border-color .2s}' +
+            '.plex-hub__filters .plex-hub__filter .plex-hub__filter-label,.plex-hub__filters .plex-hub__filter.simple-button--filter>div{margin-left:0!important;padding:0!important;background:transparent!important;text-align:center!important;white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis;min-width:0;max-width:100%;line-height:1.2;font-weight:600;font-size:.9em}' +
             '.plex-hub__filters .plex-hub__filter--active{background:rgba(229,160,13,.18)!important;border-bottom:3px solid #e5a00d;box-shadow:inset 0 0 0 1px rgba(229,160,13,.3)}' +
             '.plex-hub__filters .plex-hub__filter.focus,.plex-hub__filters .plex-hub__filter.hover{background-color:rgba(255,255,255,.15)!important;color:#fff!important}' +
             '.plex-hub__body{flex:1;min-height:0}' +

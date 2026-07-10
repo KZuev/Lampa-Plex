@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.4.1';
+    var PLUGIN_VERSION = '1.5.0';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1300,8 +1300,56 @@
         }).catch(function () { Lampa.Noty.show('Не удалось получить данные Plex'); });
     }
 
+    // ---------------------------------------------------------------------
+    // Индикатор загрузки — небольшое затемнение фона + спиннер в центре, пока
+    // грузятся сезоны/серии (иногда несколько последовательных запросов к
+    // Plex/Trakt подряд, без него экран как будто завис). Тап в любое место
+    // или «назад» на пульте (в т.ч. Apple TV) — закрывает индикатор И
+    // помечает загрузку отменённой: колбэк уже запущенного запроса, увидев
+    // cancelled, просто ничего не открывает по завершении (честный abort
+    // самого HTTP-запроса не пробрасывается через $.ajax-обёртку plexRequest
+    // — не стоит того ради экрана, который и так закрылся мгновенно).
+    // ---------------------------------------------------------------------
+
+    var PLEX_LOADER_CTRL = 'plex_loader_ctrl';
+    var _plexLoaderOverlay = null;
+    var _plexLoaderState = null;
+
+    function showPlexLoader() {
+        hidePlexLoader();
+        var overlay = $('<div class="plex-loading-overlay"><div class="plex-loading-overlay__spinner"></div></div>');
+        $('body').append(overlay);
+        _plexLoaderOverlay = overlay;
+
+        var state = { cancelled: false };
+        _plexLoaderState = state;
+
+        overlay.on('click', function () { hidePlexLoader(); });
+
+        Lampa.Controller.add(PLEX_LOADER_CTRL, {
+            toggle: function () {},
+            back: function () { hidePlexLoader(); },
+            up: function () {},
+            down: function () {},
+            left: function () {},
+            right: function () {}
+        });
+        Lampa.Controller.toggle(PLEX_LOADER_CTRL);
+
+        return state;
+    }
+
+    function hidePlexLoader() {
+        if (_plexLoaderOverlay) { _plexLoaderOverlay.remove(); _plexLoaderOverlay = null; }
+        if (_plexLoaderState) { _plexLoaderState.cancelled = true; _plexLoaderState = null; }
+        Lampa.Controller.toggle('content');
+    }
+
     function openSeasonPicker(showMeta) {
+        var loader = showPlexLoader();
         Api.children(showMeta.ratingKey).then(function (children) {
+            if (loader.cancelled) return;
+            hidePlexLoader();
             var seasons = children.filter(function (s) { return s.type === 'season'; });
             if (!seasons.length) { Lampa.Noty.show('Сезоны не найдены'); return; }
             Lampa.Select.show({
@@ -1310,13 +1358,19 @@
                 onSelect: function (a) { openEpisodePicker(showMeta, a.s); },
                 onBack: function () { Lampa.Controller.toggle('content'); }
             });
-        }).catch(function () { Lampa.Noty.show('Не удалось получить сезоны'); });
+        }).catch(function () {
+            if (loader.cancelled) return;
+            hidePlexLoader();
+            Lampa.Noty.show('Не удалось получить сезоны');
+        });
     }
 
     function openEpisodePicker(showMeta, season) {
+        var loader = showPlexLoader();
         Api.children(season.ratingKey).then(function (children) {
+            if (loader.cancelled) return;
             var episodes = children.filter(function (e) { return e.type === 'episode'; });
-            if (!episodes.length) { Lampa.Noty.show('Серии не найдены'); return; }
+            if (!episodes.length) { hidePlexLoader(); Lampa.Noty.show('Серии не найдены'); return; }
 
             var useTrakt = traktStatusEnabled();
             var showTmdbId = useTrakt ? findTmdbId(showMeta) : null;
@@ -1325,6 +1379,9 @@
             var traktEpSetPromise = (useTrakt && showTmdbId) ? getTraktShowEpisodeSet(showTmdbId) : Promise.resolve(null);
 
             traktEpSetPromise.then(function (traktEpSet) {
+                if (loader.cancelled) return;
+                hidePlexLoader();
+
                 function episodeSubtitle(e) {
                     if (traktEpSet) {
                         return traktEpSet[season.index + ':' + e.index] ? 'Просмотрено' : '';
@@ -1346,7 +1403,11 @@
                     onBack: function () { openSeasonPicker(showMeta); }
                 });
             });
-        }).catch(function () { Lampa.Noty.show('Не удалось получить серии'); });
+        }).catch(function () {
+            if (loader.cancelled) return;
+            hidePlexLoader();
+            Lampa.Noty.show('Не удалось получить серии');
+        });
     }
 
     // ---------------------------------------------------------------------
@@ -2080,8 +2141,16 @@
 
             btn.on('hover:enter', function () {
                 if (method === 'tv') {
-                    Api.metadata(match.ratingKey).then(function (meta) { openSeasonPicker(meta); })
-                        .catch(function () { Lampa.Noty.show('Не удалось получить данные Plex'); });
+                    var loader = showPlexLoader();
+                    Api.metadata(match.ratingKey).then(function (meta) {
+                        if (loader.cancelled) return;
+                        hidePlexLoader();
+                        openSeasonPicker(meta);
+                    }).catch(function () {
+                        if (loader.cancelled) return;
+                        hidePlexLoader();
+                        Lampa.Noty.show('Не удалось получить данные Plex');
+                    });
                 } else {
                     playRatingKey(match.ratingKey, e.data, { type: 'movie', tmdb: e.data.id });
                 }
@@ -2133,6 +2202,10 @@
             '.plex-hub__filters .plex-hub__filter--active{background:rgba(229,160,13,.18)!important;border-bottom:3px solid #e5a00d;box-shadow:inset 0 0 0 1px rgba(229,160,13,.3)}' +
             '.plex-hub__filters .plex-hub__filter.focus,.plex-hub__filters .plex-hub__filter.hover{background-color:rgba(255,255,255,.15)!important;color:#fff!important}' +
             '.plex-hub__body{flex:1;min-height:0}' +
+            '.plex-loading-overlay{position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center}' +
+            '.plex-loading-overlay__spinner{width:2.6em;height:2.6em;border-radius:50%;border:.25em solid rgba(255,255,255,.25);border-top-color:#e5a00d;-webkit-animation:plex-spin .8s linear infinite;animation:plex-spin .8s linear infinite}' +
+            '@-webkit-keyframes plex-spin{from{-webkit-transform:rotate(0deg)}to{-webkit-transform:rotate(360deg)}}' +
+            '@keyframes plex-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}' +
             '</style>').appendTo('head');
     }
 

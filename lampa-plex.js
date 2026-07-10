@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.1.0';
+    var PLUGIN_VERSION = '1.2.0';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -229,11 +229,11 @@
         return Api.sections().then(function (all) { return all.map(function (s) { return s.key; }); });
     }
 
-    function fetchAllSectionItems(sectionKey, onPage) {
+    function fetchAllSectionItems(sectionKey, query, onPage) {
         var pageSize = 200;
 
         function step(start) {
-            return Api.list(sectionKey, { start: start, size: pageSize }).then(function (data) {
+            return Api.list(sectionKey, { start: start, size: pageSize, query: query || '' }).then(function (data) {
                 onPage(data.items);
                 var next = start + pageSize;
                 if (data.items.length && next < data.totalSize) return step(next);
@@ -241,6 +241,25 @@
         }
 
         return step(0);
+    }
+
+    // Полная (без пагинации наружу) выборка одной медиатеки — нужна там, где
+    // Plex не даёт единого endpoint для чтения сразу нескольких медиатек
+    // (объединённый просмотр «Все») и приходится собирать/сортировать на
+    // стороне клиента.
+    function fetchAllItemsFlat(sectionKey, query) {
+        var acc = [];
+        return fetchAllSectionItems(sectionKey, query, function (items) { acc = acc.concat(items); }).then(function () { return acc; });
+    }
+
+    function fetchCombinedItems(sectionKeys, query) {
+        var all = [];
+        var chain = sectionKeys.reduce(function (prev, key) {
+            return prev.then(function () {
+                return fetchAllItemsFlat(key, query).then(function (items) { all = all.concat(items); });
+            });
+        }, Promise.resolve());
+        return chain.then(function () { return all; });
     }
 
     function rebuildTmdbIndex(opts) {
@@ -256,7 +275,7 @@
             var map = {};
             var chain = sectionKeys.reduce(function (prev, sectionKey) {
                 return prev.then(function () {
-                    return fetchAllSectionItems(sectionKey, function (items) {
+                    return fetchAllSectionItems(sectionKey, '', function (items) {
                         items.forEach(function (item) {
                             var tmdbId = findTmdbId(item);
                             if (!tmdbId) return;
@@ -1151,56 +1170,23 @@
                 return;
             }
 
-            if (chosen.length === 1) return openSectionMenu(chosen[0]);
-
-            Lampa.Select.show({
+            Lampa.Activity.push({
+                component: 'plex_hub',
                 title: 'Медиатека Plex',
-                items: chosen.map(function (s) { return { title: s.title, section: s }; }),
-                onSelect: function (a) { openSectionMenu(a.section); },
-                onBack: function () { Lampa.Controller.toggle('menu'); }
+                plex_sections_available: chosen
             });
         }).catch(function () { Lampa.Noty.show('Не удалось подключиться к Plex'); });
-    }
-
-    function openSectionMenu(section) {
-        Lampa.Select.show({
-            title: section.title,
-            items: [
-                { title: 'Открыть медиатеку', action: 'browse' },
-                { title: 'Поиск', action: 'search' }
-            ],
-            onSelect: function (a) {
-                if (a.action === 'search') {
-                    Lampa.Input.edit({ title: 'Поиск: ' + section.title, value: '', free: true, nosave: true }, function (q) {
-                        if (q) openSection(section, q);
-                    });
-                } else {
-                    openSection(section);
-                }
-            },
-            onBack: function () { Lampa.Controller.toggle('menu'); }
-        });
-    }
-
-    function openSection(section, query) {
-        Lampa.Activity.push({
-            component: 'plex_library',
-            title: query ? (section.title + ': ' + query) : section.title,
-            plex_section: section.key,
-            plex_type: section.type,
-            plex_query: query || ''
-        });
     }
 
     // ---------------------------------------------------------------------
     // Карточка → hybrid-роутинг (родная карточка TMDB либо своя модалка)
     // ---------------------------------------------------------------------
 
-    function toCard(item, object) {
+    function toCard(item) {
         var tmdbId = findTmdbId(item);
         var poster = item.thumb ? plexUrl(item.thumb) : '';
         var backdrop = item.art ? plexUrl(item.art) : poster;
-        var method = object.plex_type === 'show' ? 'tv' : 'movie';
+        var method = item.type === 'show' ? 'tv' : 'movie';
 
         var base = {
             title: item.title,
@@ -1211,8 +1197,8 @@
             image: backdrop,
             img: poster,
             plex_rating_key: item.ratingKey,
-            plex_section: object.plex_section,
-            plex_type: object.plex_type
+            plex_section: item.librarySectionID != null ? String(item.librarySectionID) : '',
+            plex_type: method === 'tv' ? 'show' : 'movie'
         };
 
         if (tmdbId) {
@@ -1475,36 +1461,95 @@
     }
 
     // ---------------------------------------------------------------------
-    // Компонент "Медиатека Plex" (сетка карточек секции)
+    // Сортировка объединённого списка (Plex сам сортирует только внутри
+    // одной медиатеки — при просмотре сразу нескольких сортируем на клиенте)
     // ---------------------------------------------------------------------
 
-    Lampa.Component.add('plex_library', function (object) {
+    var PLEX_SORT_LABELS = { titleSort: 'Название', year: 'Год', addedAt: 'Дата добавления', rating: 'Рейтинг' };
+    var PLEX_SORT_ORDER = ['titleSort', 'year', 'addedAt', 'rating'];
+
+    function plexSortValue(item, field) {
+        if (field === 'year') return Number(item.year || 0);
+        if (field === 'addedAt') return Number(item.addedAt || 0);
+        if (field === 'rating') return Number(item.rating || item.audienceRating || 0);
+        return (item.titleSort || item.title || '').toLowerCase();
+    }
+
+    function sortItems(items, field, order) {
+        var sorted = items.slice().sort(function (a, b) {
+            var av = plexSortValue(a, field), bv = plexSortValue(b, field);
+            if (av < bv) return -1;
+            if (av > bv) return 1;
+            return 0;
+        });
+        if (order === 'desc') sorted.reverse();
+        return sorted;
+    }
+
+    // ---------------------------------------------------------------------
+    // Компонент "Медиатека Plex" (сетка карточек)
+    // ---------------------------------------------------------------------
+
+    // Одна медиатека — честная постраничная загрузка и сортировка средствами
+    // Plex (быстро, не тянет всё в память). Несколько медиатек сразу («Все») —
+    // Plex не даёт единого endpoint на объединённый список, поэтому собираем
+    // все страницы всех выбранных медиатек и сортируем/пагинируем на клиенте.
+    function makePlexLibraryComponent(object) {
+        if (!object.page) object.page = 1;
         var comp = Lampa.Maker.make('Category', object);
         var page = 1;
         var totalPages = 1;
         var pageSize = 50;
+        var combined = (object.plex_sections || []).length > 1;
+        var mergedItems = null;
 
-        function fetchPage(pageNum, resolve, reject) {
-            Api.list(object.plex_section, {
-                start: (pageNum - 1) * pageSize,
-                size: pageSize,
-                query: object.plex_query || ''
-            }).then(function (data) {
-                totalPages = Math.max(1, Math.ceil(data.totalSize / pageSize));
-                var results = data.items.map(function (item) { return toCard(item, object); });
+        function serveCombinedPage(pageNum, resolve, reject) {
+            var ready = mergedItems ? Promise.resolve(mergedItems) : fetchCombinedItems(object.plex_sections, object.plex_query || '').then(function (items) {
+                var sort = object.plex_sort || { field: 'titleSort', order: 'asc' };
+                mergedItems = sortItems(items, sort.field, sort.order);
+                return mergedItems;
+            });
+
+            ready.then(function (items) {
+                totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+                var start = (pageNum - 1) * pageSize;
+                var results = items.slice(start, start + pageSize).map(toCard);
                 resolve({ results: results, total_pages: totalPages, page: pageNum });
             }).catch(function () { reject(); });
+        }
+
+        function serveSectionPage(pageNum, resolve, reject) {
+            var opts = { start: (pageNum - 1) * pageSize, size: pageSize, query: object.plex_query || '' };
+            if (!opts.query && object.plex_sort) opts.sort = object.plex_sort.field + ':' + object.plex_sort.order;
+
+            Api.list(object.plex_sections[0], opts).then(function (data) {
+                totalPages = Math.max(1, Math.ceil(data.totalSize / pageSize));
+                var results = data.items.map(toCard);
+                resolve({ results: results, total_pages: totalPages, page: pageNum });
+            }).catch(function () { reject(); });
+        }
+
+        function servePage(pageNum, resolve, reject) {
+            if (combined) serveCombinedPage(pageNum, resolve, reject);
+            else serveSectionPage(pageNum, resolve, reject);
         }
 
         comp.use({
             onCreate: function () {
                 page = 1;
-                fetchPage(page, this.build.bind(this), this.empty.bind(this));
+                servePage(page, this.build.bind(this), this.empty.bind(this));
             },
             onNext: function (resolve, reject) {
                 if (page >= totalPages) { reject.call(this); return; }
                 page++;
-                fetchPage(page, resolve, reject);
+                servePage(page, resolve, reject);
+            },
+            onController: function (controller) {
+                if (typeof object.onHead !== 'function') return;
+                controller.up = function () {
+                    if (Navigator.canmove('up')) Navigator.move('up');
+                    else object.onHead();
+                };
             },
             onInstance: function (card, element) {
                 card.use({
@@ -1515,6 +1560,172 @@
         });
 
         return comp;
+    }
+
+    Lampa.Component.add('plex_library', makePlexLibraryComponent);
+
+    // ---------------------------------------------------------------------
+    // Компонент "Медиатека Plex" — хаб: объединённый список всех выбранных
+    // медиатек + строка фильтров (медиатека/поиск, сортировка) сверху, по
+    // аналогии с «Хочу посмотреть» из LampaTrakt (свой Controller-стейт для
+    // строки фильтров, переключаемый через onHead/onController у вложенного
+    // Category-компонента).
+    // ---------------------------------------------------------------------
+
+    Lampa.Component.add('plex_hub', function (object) {
+        var FILTER_CTRL = 'plex_hub_controls';
+        var activity, html, controls, filtersRow, body;
+        var currentView = null;
+        var lastFilterFocus = null;
+        var sections = object.plex_sections_available || [];
+        var activeSectionKey = null; // null = «Все»
+        var activeQuery = '';
+        var activeSort = { field: 'titleSort', order: 'asc' };
+        var libraryBtn, sortBtn;
+
+        function restoreFilters() { Lampa.Controller.toggle(FILTER_CTRL); }
+
+        function activeSection() {
+            return sections.filter(function (s) { return s.key === activeSectionKey; })[0];
+        }
+
+        function getLibraryLabel() {
+            var base = activeSectionKey ? (activeSection() ? activeSection().title : 'Все') : 'Все';
+            return activeQuery ? (base + ': ' + activeQuery) : base;
+        }
+
+        function getSortLabel() {
+            return PLEX_SORT_LABELS[activeSort.field] + ' ' + (activeSort.order === 'desc' ? '↓' : '↑');
+        }
+
+        function updateBtn(btn, label) { btn.find('.plex-hub__filter-label').text(label); }
+
+        function makeBtn(label) {
+            var btn = $('<div class="simple-button simple-button--filter selector plex-hub__filter"><div class="plex-hub__filter-label"></div></div>');
+            btn.css({ 'justify-content': 'center', 'align-items': 'center', 'height': 'auto', 'border-radius': '1.1em', 'padding': '.7em .9em', 'flex': '1 1 auto', 'box-sizing': 'border-box' });
+            btn.find('.plex-hub__filter-label').css({ 'width': '100%', 'text-align': 'center', 'white-space': 'normal', 'word-break': 'break-word', 'line-height': '1.3' });
+            updateBtn(btn, label);
+            return btn;
+        }
+
+        function openSearch() {
+            Lampa.Input.edit({ title: activeSectionKey ? ('Поиск: ' + (activeSection() ? activeSection().title : '')) : 'Поиск по всем медиатекам', value: activeQuery, free: true, nosave: true }, function (q) {
+                activeQuery = q || '';
+                updateBtn(libraryBtn, getLibraryLabel());
+                rebuildView();
+                restoreFilters();
+            });
+        }
+
+        function openLibraryFilter() {
+            var items = [{ title: 'Поиск', action: 'search' }, { title: 'Все', key: null, selected: !activeSectionKey }];
+            sections.forEach(function (s) { items.push({ title: s.title, key: s.key, selected: activeSectionKey === s.key }); });
+
+            Lampa.Select.show({
+                title: 'Медиатека',
+                items: items,
+                onSelect: function (a) {
+                    if (a.action === 'search') { openSearch(); return; }
+                    activeSectionKey = a.key;
+                    activeQuery = '';
+                    updateBtn(libraryBtn, getLibraryLabel());
+                    rebuildView();
+                    restoreFilters();
+                },
+                onBack: restoreFilters
+            });
+        }
+
+        function openSortMenu() {
+            var items = PLEX_SORT_ORDER.map(function (field) {
+                return { title: PLEX_SORT_LABELS[field] + (activeSort.field === field ? ('  ' + (activeSort.order === 'desc' ? '↓' : '↑')) : ''), field: field };
+            });
+
+            Lampa.Select.show({
+                title: 'Сортировка',
+                items: items,
+                onSelect: function (a) {
+                    activeSort.order = (activeSort.field === a.field && activeSort.order === 'asc') ? 'desc' : 'asc';
+                    activeSort.field = a.field;
+                    updateBtn(sortBtn, getSortLabel());
+                    rebuildView();
+                    restoreFilters();
+                },
+                onBack: restoreFilters
+            });
+        }
+
+        function rebuildView() {
+            if (currentView && currentView.destroy) currentView.destroy();
+            body.empty();
+
+            var sectionKeys = activeSectionKey ? [activeSectionKey] : sections.map(function (s) { return s.key; });
+
+            currentView = makePlexLibraryComponent(extend({}, object, {
+                plex_sections: sectionKeys,
+                plex_query: activeQuery,
+                plex_sort: activeSort,
+                onHead: function () { Lampa.Controller.toggle(FILTER_CTRL); }
+            }));
+            currentView.activity = activity;
+            currentView.create();
+            body.append(currentView.render());
+            if (currentView.start) currentView.start();
+        }
+
+        return {
+            create: function () {
+                activity = this.activity;
+                html = $('<div class="plex-hub"></div>');
+                controls = $('<div class="plex-hub__controls"></div>');
+                body = $('<div class="plex-hub__body"></div>');
+                filtersRow = $('<div class="plex-hub__filters"></div>');
+
+                libraryBtn = makeBtn(getLibraryLabel());
+                libraryBtn.on('hover:enter', function () { lastFilterFocus = libraryBtn[0]; openLibraryFilter(); });
+                sortBtn = makeBtn(getSortLabel());
+                sortBtn.on('hover:enter', function () { lastFilterFocus = sortBtn[0]; openSortMenu(); });
+
+                filtersRow.append(libraryBtn, sortBtn);
+                controls.append(filtersRow);
+                html.append(controls, body);
+
+                Lampa.Controller.add(FILTER_CTRL, {
+                    toggle: function () {
+                        Lampa.Controller.collectionSet(controls);
+                        var focus = lastFilterFocus && document.body.contains(lastFilterFocus) ? lastFilterFocus : filtersRow.find('.selector')[0];
+                        Lampa.Controller.collectionFocus(focus || false, controls);
+                    },
+                    right: function () { Navigator.move('right'); },
+                    left: function () {
+                        if (Navigator.canmove('left')) Navigator.move('left');
+                        else Lampa.Controller.toggle('menu');
+                    },
+                    down: function () {
+                        if (Navigator.canmove('down')) Navigator.move('down');
+                        else Lampa.Controller.toggle('content');
+                    },
+                    up: function () {
+                        if (Navigator.canmove('up')) Navigator.move('up');
+                        else Lampa.Controller.toggle('head');
+                    },
+                    back: function () { Lampa.Activity.backward(); }
+                });
+
+                rebuildView();
+
+                return this.render();
+            },
+            render: function (js) { return js ? html[0] : html; },
+            start: function () { if (currentView && currentView.start) currentView.start(); },
+            pause: function () {},
+            stop: function () {},
+            destroy: function () {
+                if (currentView && currentView.destroy) currentView.destroy();
+                if (html) html.remove();
+                currentView = null;
+            }
+        };
     });
 
     // ---------------------------------------------------------------------
@@ -1617,6 +1828,10 @@
             '.plex-device-auth__qr img{width:220px;height:220px;margin:0 auto 1em;border-radius:.5em}' +
             '.plex-device-auth__code{font-size:1.4em;letter-spacing:.15em}' +
             '.full-start__button.plex-watch-btn svg{width:1.4em;height:1.4em}' +
+            '.plex-hub{display:flex;flex-direction:column;height:100%}' +
+            '.plex-hub__controls{padding:0 3em;margin:1em 0}' +
+            '.plex-hub__filters{display:flex;gap:.6em}' +
+            '.plex-hub__body{flex:1 1 auto;min-height:0}' +
             '</style>').appendTo('head');
     }
 

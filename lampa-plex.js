@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.4.0';
+    var PLUGIN_VERSION = '1.4.1';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -22,16 +22,28 @@
     // Стрелка — currentColor (наследует цвет темы/фокуса, как остальные значки
     // Lampa). Вокруг — контур того самого скруглённого квадрата-рамки из
     // оригинальной иконки, но не залитый, а только обводка фиксированным белым
-    // (не currentColor) по краю, чтобы форма всегда читалась чётко.
+    // (не currentColor) по краю, чтобы форма всегда читалась чётко. Именно
+    // из-за этого фиксированного #fff (не currentColor) значок непригоден для
+    // левого меню: Lampa на фокусе перекрашивает currentColor-элементы под
+    // контраст с подсветкой пункта, а фиксированная белая рамка не участвует
+    // в этом и на некоторых подсветках превращается в «тёмный квадрат без
+    // стрелки» (сообщено пользователем) — рамка глушит стрелку визуально.
     var PLEX_PLAY_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" aria-hidden="true" focusable="false">' +
         '<rect x="12" y="12" width="488" height="488" rx="76" fill="none" stroke="#fff" stroke-width="24"/>' +
         '<path fill="currentColor" d="M256 70H148l108 186-108 186h108l108-186z"/>' +
         '</svg>';
 
-    // В левом меню — тот же значок play-в-квадрате, что и у кнопки «Смотреть
+    // Та же стрелка-play для левого меню, но без фиксированной рамки —
+    // целиком currentColor (как PLEX_ICON/plex-brand-icon), чтобы корректно
+    // перекрашивалась в состоянии фокуса вместе с остальным пунктом меню.
+    var PLEX_MENU_ICON = '<svg class="plex-brand-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" aria-hidden="true" focusable="false">' +
+        '<path fill="currentColor" d="M256 70H148l108 186-108 186h108l108-186z"/>' +
+        '</svg>';
+
+    // В левом меню — тот же мотив (стрелка-play), что и у кнопки «Смотреть
     // из Plex» на карточке (по просьбе пользователя), а не логотип-вихрь.
     // В настройках логотип остаётся прежним.
-    var ICON_MENU = PLEX_PLAY_ICON;
+    var ICON_MENU = PLEX_MENU_ICON;
     var ICON_SETTINGS = PLEX_ICON;
 
     // ---------------------------------------------------------------------

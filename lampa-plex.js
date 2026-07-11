@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.6.0';
+    var PLUGIN_VERSION = '1.6.1';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1291,6 +1291,15 @@
             plex_section: item.librarySectionID != null ? String(item.librarySectionID) : '',
             plex_type: method === 'tv' ? 'show' : 'movie'
         };
+
+        // Родной бейдж «TV» на постере (interaction/card/module/icons.js) вешает
+        // сама Lampa по одному-единственному признаку — истинному `original_name`
+        // (конвенция TMDB для сериалов); наши карточки строятся из данных Plex,
+        // где такого поля никогда не было, поэтому бейдж не появлялся ни на
+        // сопоставленных с TMDB, ни тем более на собственных карточках без
+        // сопоставления. Это никак не связано с source:'tmdb'/component:'full'
+        // ниже — модуль Icons смотрит только на сам объект данных карточки.
+        if (method === 'tv') base.original_name = item.title;
 
         if (tmdbId) {
             extend(base, {

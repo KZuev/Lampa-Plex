@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.2';
+    var PLUGIN_VERSION = '1.7.3';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1418,48 +1418,43 @@
     }
 
     // ---------------------------------------------------------------------
-    // Индикатор загрузки — небольшое затемнение фона + спиннер в центре, пока
-    // грузятся сезоны/серии (иногда несколько последовательных запросов к
-    // Plex/Trakt подряд, без него экран как будто завис). Тап в любое место
-    // или «назад» на пульте (в т.ч. Apple TV) — закрывает индикатор И
-    // помечает загрузку отменённой: колбэк уже запущенного запроса, увидев
-    // cancelled, просто ничего не открывает по завершении (честный abort
-    // самого HTTP-запроса не пробрасывается через $.ajax-обёртку plexRequest
-    // — не стоит того ради экрана, который и так закрылся мгновенно).
+    // Индикатор загрузки, пока грузятся сезоны/серии (иногда несколько
+    // последовательных запросов к Plex/Trakt подряд, без него экран как будто
+    // завис). Раньше был собственный оверлей+спиннер на голых CSS-em — на
+    // iPhone размер спиннера оказался заметно мельче, чем у родного индикатора
+    // Lampa (на Apple TV, где масштаб em/rem для «десятифутового» интерфейса
+    // другой, совпадало случайно). Вместо подбора своих единиц — используем
+    // сам родной `Lampa.Loading` (interaction/loading.js, публикуется на
+    // `window.Lampa.Loading`): тот же слой `.loading-layer`/`.loading-layer__ico`,
+    // что и у любого другого индикатора загрузки в Lampa, поэтому размер
+    // гарантированно совпадает с остальным приложением на любой платформе.
+    // Бонус: `Lampa.Loading` сам восстанавливает тот Controller, что был
+    // активен ДО показа (а не жёстко 'content', как было у нас), и сам вешает
+    // отмену на «назад» И на любую стрелку направления (не только «назад»).
+    // Сохраняем прежний внешний интерфейс (showPlexLoader()/hidePlexLoader()),
+    // чтобы не переписывать вызывающий код в openSeasonPicker/openEpisodePicker
+    // и injectPlexButton.
     // ---------------------------------------------------------------------
 
-    var PLEX_LOADER_CTRL = 'plex_loader_ctrl';
-    var _plexLoaderOverlay = null;
     var _plexLoaderState = null;
 
     function showPlexLoader() {
         hidePlexLoader();
-        var overlay = $('<div class="plex-loading-overlay"><div class="plex-loading-overlay__spinner"></div></div>');
-        $('body').append(overlay);
-        _plexLoaderOverlay = overlay;
-
         var state = { cancelled: false };
         _plexLoaderState = state;
 
-        overlay.on('click', function () { hidePlexLoader(); });
-
-        Lampa.Controller.add(PLEX_LOADER_CTRL, {
-            toggle: function () {},
-            back: function () { hidePlexLoader(); },
-            up: function () {},
-            down: function () {},
-            left: function () {},
-            right: function () {}
+        Lampa.Loading.start(function () {
+            state.cancelled = true;
+            Lampa.Loading.stop();
+            if (_plexLoaderState === state) _plexLoaderState = null;
         });
-        Lampa.Controller.toggle(PLEX_LOADER_CTRL);
 
         return state;
     }
 
     function hidePlexLoader() {
-        if (_plexLoaderOverlay) { _plexLoaderOverlay.remove(); _plexLoaderOverlay = null; }
         if (_plexLoaderState) { _plexLoaderState.cancelled = true; _plexLoaderState = null; }
-        Lampa.Controller.toggle('content');
+        Lampa.Loading.stop();
     }
 
     function openSeasonPicker(showMeta) {
@@ -2440,10 +2435,6 @@
             '.plex-hub__filters .plex-hub__filter--active{background:rgba(229,160,13,.18)!important;border-bottom:3px solid #e5a00d;box-shadow:inset 0 0 0 1px rgba(229,160,13,.3)}' +
             '.plex-hub__filters .plex-hub__filter.focus,.plex-hub__filters .plex-hub__filter.hover{background-color:rgba(255,255,255,.15)!important;color:#fff!important}' +
             '.plex-hub__body{flex:1;min-height:0}' +
-            '.plex-loading-overlay{position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center}' +
-            '.plex-loading-overlay__spinner{width:2.6em;height:2.6em;border-radius:50%;border:.25em solid rgba(255,255,255,.25);border-top-color:#e5a00d;-webkit-animation:plex-spin .8s linear infinite;animation:plex-spin .8s linear infinite}' +
-            '@-webkit-keyframes plex-spin{from{-webkit-transform:rotate(0deg)}to{-webkit-transform:rotate(360deg)}}' +
-            '@keyframes plex-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}' +
             '</style>').appendTo('head');
     }
 

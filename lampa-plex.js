@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.9';
+    var PLUGIN_VERSION = '1.7.10';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1446,16 +1446,32 @@
     // реагирующий на «назад».
     // ---------------------------------------------------------------------
 
-    // Снятие классов индикатора (hidePlexLoader) и открытие Lampa.Select —
-    // это две отдельные операции с DOM/CSS-переходами (наше затемнение и
-    // родной transform-слайд панели), падающие в один и тот же тик. На
-    // слабых устройствах браузер не успевает отрисовать одно раньше другого,
-    // из-за чего родной 0.2s-слайд панели визуально дёргается/растягивается
-    // (жалоба «панель выезжает как будто за секунду»). Разносим их по
-    // разным кадрам через requestAnimationFrame — сначала гасим индикатор
-    // и даём кадру отрисоваться, потом уже открываем Select.
-    function deferPaint(fn) {
-        (window.requestAnimationFrame || function (cb) { setTimeout(cb, 16); })(fn);
+    // Lampa.Select — ОДИН общий DOM-узел на всё приложение (`interaction/select.js`,
+    // модульная переменная `html`, создаётся один раз в `init()`), который при
+    // выборе пункта сперва играет closing-переход (`hide()`: снимает
+    // `selectbox--open`/`animate`, .selectbox__content{transition:transform .2s}
+    // едет обратно за экран), и только ПОТОМ вызывается наш `onSelect`. Если наш
+    // следующий `Select.show()` (список серий после списка сезонов и т.п.)
+    // вызывается раньше, чем этот .2s переход успевает доиграть — а это обычный
+    // случай при быстром ответе Plex с локального сервера, особенно после
+    // фикса v1.7.8, где индикатор нарочно не показывается при быстрых ответах —
+    // родной `bind()` подменяет содержимое (сезоны → серии) ПРЯМО ПОСЕРЕДИНЕ ещё
+    // не закончившегося закрытия: список резко меняется, пока панель ещё
+    // визуально едет — отсюда и «дёргается, будто выезжает за секунду». Пробовали
+    // разносить это на соседний кадр через requestAnimationFrame (v1.7.9) — не
+    // помогло, значит дело не в конкуренции за кадр отрисовки, а именно в этом
+    // наложении на ещё не отыгранный .2s переход. Поэтому гарантируем явно: между
+    // моментом, когда предыдущая панель закрылась (синхронно, на входе в
+    // openSeasonPicker/openEpisodePicker — вызов этих функций и есть тот самый
+    // момент сразу после hide() предыдущей панели), и вызовом следующего
+    // Select.show() должно пройти не меньше времени, чем сам .2s переход, даже
+    // если сетевой ответ пришёл почти мгновенно.
+    var PLEX_SELECT_TRANSITION_MS = 220;
+
+    function afterPreviousSelectClosed(startedAt, fn) {
+        var wait = PLEX_SELECT_TRANSITION_MS - (Date.now() - startedAt);
+        if (wait > 0) setTimeout(fn, wait);
+        else fn();
     }
 
     var PLEX_LOADER_CTRL = 'plex_loader_ctrl';
@@ -1544,13 +1560,14 @@
     }
 
     function openSeasonPicker(showMeta) {
+        var startedAt = Date.now();
         var loader = showPlexLoader();
         Api.children(showMeta.ratingKey).then(function (children) {
             if (loader.cancelled) return;
             hidePlexLoader();
             var seasons = children.filter(function (s) { return s.type === 'season'; });
             if (!seasons.length) { Lampa.Noty.show('Сезоны не найдены'); return; }
-            deferPaint(function () {
+            afterPreviousSelectClosed(startedAt, function () {
                 Lampa.Select.show({
                     title: showMeta.title,
                     items: seasons.map(function (s) { return { title: s.title || ('Сезон ' + s.index), s: s }; }),
@@ -1566,6 +1583,7 @@
     }
 
     function openEpisodePicker(showMeta, season) {
+        var startedAt = Date.now();
         var loader = showPlexLoader();
         Api.children(season.ratingKey).then(function (children) {
             if (loader.cancelled) return;
@@ -1591,7 +1609,7 @@
                     return watched ? 'Просмотрено' : (progress ? progress + '%' : '');
                 }
 
-                deferPaint(function () {
+                afterPreviousSelectClosed(startedAt, function () {
                     Lampa.Select.show({
                         title: season.title || ('Сезон ' + season.index),
                         items: episodes.map(function (e) {

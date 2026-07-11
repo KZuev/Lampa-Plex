@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.5.1';
+    var PLUGIN_VERSION = '1.5.2';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -434,6 +434,11 @@
     // гадать вслепую, если статусы Trakt не подтягиваются (истёкший токен,
     // не тот client_id и т.п.), а не молча падать обратно на Plex без следа.
     var _traktLastFetch = { at: 0, ok: null, error: '' };
+
+    // Диагностика последней попытки повесить бейджи LampaTrakt на карточку
+    // медиатеки (см. onInstance в makePlexLibraryComponent) — показывается в
+    // настройках («Проверить бейджи LampaTrakt на медиатеке»).
+    var _plexBadgesLastAttempt = null;
 
     // Карта 'movie:<tmdbId>' -> true, 'tv:<tmdbId>' -> {completed, traktId, episodes:{...}}.
     // Разбивка по сериям у Trakt в /sync/watched/shows нестабильна (LampaTrakt
@@ -1174,6 +1179,33 @@
             onChange: function () { confirmTraktSyncToPlex(); }
         });
 
+        Lampa.SettingsApi.addParam({
+            component: 'plex',
+            param: { name: 'plex_badges_debug', type: 'button' },
+            field: { name: 'Проверить бейджи LampaTrakt на медиатеке', description: 'Диагностика последней попытки применить window.TraktTV.applyBadges к карточке в разделе «Plex». Не гейтится тумблером «Статусы Trakt.TV» — бейджи работают независимо от него.' },
+            onRender: function (item) {
+                if (!traktAvailable()) { item.hide(); return; }
+                item.show();
+                item.find('.plex-field-status').remove();
+                var status;
+                if (!_plexBadgesLastAttempt) {
+                    status = 'ещё не было карточек — откройте раздел «Plex» в меню, затем вернитесь сюда';
+                } else {
+                    var a = _plexBadgesLastAttempt;
+                    var when = new Date(a.at).toLocaleString();
+                    if (!a.available) {
+                        status = when + ' — window.TraktTV.applyBadges не найден (LampaTrakt не установлен/не проинициализировался)';
+                    } else if (a.error) {
+                        status = when + ' — ошибка внутри applyBadges: ' + a.error;
+                    } else {
+                        status = when + ' — вызван без ошибок (id: ' + (a.id || '—') + ', тип: ' + (a.method || '—') + ')';
+                    }
+                }
+                item.append('<div class="settings-param__value plex-field-status" style="font-size:.85em;opacity:.65">' + escapeHtml(status) + '</div>');
+            },
+            onChange: function () { Lampa.Settings.update(); }
+        });
+
         sectionHeader('plex_other_section', 'Прочее');
 
         Lampa.SettingsApi.addParam({
@@ -1784,9 +1816,29 @@
                 // LampaTrakt не установлен или у карточки нет tmdb id/типа
                 // (элементы Plex без сопоставления с TMDB — у них этих полей
                 // нет вовсе, для них бейджи принципиально невозможны).
-                if (window.TraktTV && typeof window.TraktTV.applyBadges === 'function') {
-                    window.TraktTV.applyBadges(card);
-                }
+                //
+                // Вызываем НЕ синхронно здесь, а отложенно (следующий тик):
+                // `onInstance` в родном create.js вызывается ДО `item.create()`
+                // (`this.emit('instance', item, element); item.create(); ...`),
+                // то есть DOM самой карточки (`card.render()`) на этот момент
+                // ещё не построен — applyBadges, скорее всего, не находит куда
+                // вставлять бейджи и молча ничего не делает. setTimeout(0)
+                // гарантированно попадает уже ПОСЛЕ синхронного item.create().
+                // Плюс try/catch и запись результата в _plexBadgesLastAttempt —
+                // чтобы можно было проверить прямо в настройках плагина, не
+                // подключая консоль/логи устройства (см. «Проверить бейджи
+                // LampaTrakt на медиатеке» в разделе «Прочее»).
+                setTimeout(function () {
+                    var available = !!(window.TraktTV && typeof window.TraktTV.applyBadges === 'function');
+                    var data = card.data || element || {};
+                    var attempt = { at: Date.now(), available: available, id: data.id || null, method: data.method || data.card_type || null, error: '' };
+                    try {
+                        if (available) window.TraktTV.applyBadges(card);
+                    } catch (err) {
+                        attempt.error = (err && err.message) || String(err);
+                    }
+                    _plexBadgesLastAttempt = attempt;
+                }, 0);
             }
         });
 

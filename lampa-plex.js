@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.6';
+    var PLUGIN_VERSION = '1.7.7';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1418,25 +1418,30 @@
     }
 
     // ---------------------------------------------------------------------
-    // Индикатор загрузки, пока грузятся сезоны/серии. Пробовали `Lampa.Loading`
-    // (родной слой `.loading-layer`) — оказалось, что это ДРУГОЙ нативный
-    // индикатор: маленькое кольцо в текстовой плашке «Загрузка» внизу экрана,
-    // не то, что пользователь имел в виду («большое кольцо по центру»). Тот,
-    // что имелся в виду — родной оверлей самой Activity (`.activity__loader`,
-    // `interaction/activity/slide.js`: `ActivitySlide.loader(status)` просто
-    // toggle-ит класс `activity--load`, у которого в CSS — затемнение
-    // `.activity__body{opacity:0}` и `.activity__loader{background:url(loader.svg)
-    // no-repeat 50% 50%}` НА ВЕСЬ экран активности, отсюда и «большое, по
-    // центру»); он используется, например, встроенным `Lampa.Maker`'ом Category
-    // (`this.activity.loader(true)`), поэтому пользователь и узнаёт его —
-    // ровно тот же спиннер, что при обычной загрузке каталога.
-    // Получаем этот же экземпляр для ТЕКУЩЕЙ (видимой) активности через
-    // `Lampa.Activity.active().activity` (тот самый `ActivitySlide`) — без
-    // этого у нас нет доступа к `.loader()`, т.к. вызывается не изнутри
-    // жизненного цикла компонента, а из обработчика кнопки/выбора сезона.
-    // У этого нативного оверлея НЕТ своей отмены по тапу/«назад» (в обычных
-    // сценариях Lampa он и не должен отменяться) — специально для нашего
-    // случая (пользователь просил именно такую отмену) добавляем поверх
+    // Индикатор загрузки, пока грузятся сезоны/серии. Изначально использовали
+    // родной `ActivitySlide.loader(status)` (`interaction/activity/slide.js`),
+    // который просто toggle-ит класс `activity--load` на `.activity` — тот же
+    // спиннер `.activity__loader`, что и у встроенного `Lampa.Maker` Category.
+    // ЭТО ОКАЗАЛОСЬ ПРИЧИНОЙ ДЁРГАНЬЯ ЭКРАНА: в родном `app.css` есть правило
+    //   .activity:not(.activity--load) .activity__body { animation: animation-activity 0.2s }
+    // (`animation-activity` — это ТА САМАЯ анимация выезда карточки снизу при
+    // открытии, translate3d 14% → 0) — она навешена на селектор, зависящий от
+    // ОТСУТСТВИЯ класса `activity--load`. Как только `hidePlexLoader()` снимал
+    // `activity--load` (а показать/скрыть его приходится на каждый шаг цепочки
+    // metadata → сезоны → серии), `.activity__body` снова начинал матчить этот
+    // селектор и браузер переигрывал анимацию с нуля — визуально неотличимо от
+    // повторного открытия карточки, именно это описал пользователь («дёргается
+    // как будто открывается карточка, каждый раз при переходе сезон/серия»).
+    // Фикс: НЕ трогаем `.activity--load`/`.loader()` вообще. Вместо этого
+    // напрямую показываем/прячем существующий (всегда присутствующий, просто
+    // display:none) элемент `.activity__loader` — родной сосед `.activity__body`
+    // внутри `.activity` (шаблон `templates/activity.js`) — через свой класс
+    // `plex-loader-show`, и дублируем затемнение своим `plex-loader-dim` прямо
+    // на `.activity__body`, не завязываясь на `activity--load` ни разу. Доступ
+    // к обоим элементам — через `Lampa.Activity.active().activity` (`ActivitySlide`,
+    // публичные поля `.slide` и `.body`).
+    // У этого индикатора НЕТ своей отмены по тапу/«назад» — специально для
+    // нашего случая (пользователь просил именно такую отмену) добавляем поверх
     // невидимый перехватчик клика на весь экран + временный Controller,
     // реагирующий на «назад».
     // ---------------------------------------------------------------------
@@ -1444,6 +1449,7 @@
     var PLEX_LOADER_CTRL = 'plex_loader_ctrl';
     var _plexLoaderState = null;
     var _plexLoaderActivity = null;
+    var _plexLoaderIcon = null;
     var _plexLoaderCatcher = null;
 
     // showPlexLoader() умеет «переиспользоваться»: если следующий шаг цепочки
@@ -1452,7 +1458,7 @@
     // пока предыдущий ещё не скрыт — возвращаем тот же самый {cancelled}, не
     // трогая DOM/классы повторно. Без этого между двумя последовательными
     // запросами (metadata → children) индикатор гасился и тут же снова
-    // показывался — то самое дёрганье экрана, о котором сообщил пользователь.
+    // показывался — лишний повторный проигрыш той же анимации.
     function showPlexLoader() {
         if (_plexLoaderState) return _plexLoaderState;
 
@@ -1460,13 +1466,11 @@
         _plexLoaderState = state;
 
         var active = Lampa.Activity.active();
-        _plexLoaderActivity = (active && active.activity && typeof active.activity.loader === 'function') ? active.activity : null;
+        _plexLoaderActivity = (active && active.activity && active.activity.slide) ? active.activity : null;
         if (_plexLoaderActivity) {
-            _plexLoaderActivity.loader(true);
-            // Родной .activity--load полностью прячет контент под спиннером
-            // (opacity:0) — по просьбе пользователя вместо исчезновения делаем
-            // лёгкое затемнение (см. правило .plex-loader-dim в injectStyles).
-            if (_plexLoaderActivity.slide) _plexLoaderActivity.slide.addClass('plex-loader-dim');
+            _plexLoaderIcon = _plexLoaderActivity.slide.find('.activity__loader');
+            _plexLoaderIcon.addClass('plex-loader-show');
+            if (_plexLoaderActivity.body) _plexLoaderActivity.body.addClass('plex-loader-dim');
         }
 
         var catcher = $('<div class="plex-loader-catcher"></div>');
@@ -1490,14 +1494,14 @@
     // Просто скрывает индикатор — используется, когда следующим шагом сразу
     // открывается Select/модалка (та сама возьмёт контроллер на себя, поэтому
     // здесь НЕ восстанавливаем фокус на 'content' — лишний промежуточный
-    // Controller.toggle('content') прямо перед открытием Select и был второй
-    // причиной дёрганья экрана: фокус/скролл на миг прыгал на список карточек
-    // и тут же перескакивал на Select).
+    // Controller.toggle('content') прямо перед открытием Select был отдельной
+    // причиной дёрганья: фокус/скролл на миг прыгал на список карточек и тут
+    // же перескакивал на Select).
     function hidePlexLoader() {
         if (_plexLoaderState) { _plexLoaderState.cancelled = true; _plexLoaderState = null; }
+        if (_plexLoaderIcon) { _plexLoaderIcon.removeClass('plex-loader-show'); _plexLoaderIcon = null; }
         if (_plexLoaderActivity) {
-            if (_plexLoaderActivity.slide) _plexLoaderActivity.slide.removeClass('plex-loader-dim');
-            _plexLoaderActivity.loader(false);
+            if (_plexLoaderActivity.body) _plexLoaderActivity.body.removeClass('plex-loader-dim');
             _plexLoaderActivity = null;
         }
         if (_plexLoaderCatcher) { _plexLoaderCatcher.remove(); _plexLoaderCatcher = null; }
@@ -2493,16 +2497,19 @@
             '.plex-hub__filters .plex-hub__filter--active{background:rgba(229,160,13,.18)!important;border-bottom:3px solid #e5a00d;box-shadow:inset 0 0 0 1px rgba(229,160,13,.3)}' +
             '.plex-hub__filters .plex-hub__filter.focus,.plex-hub__filters .plex-hub__filter.hover{background-color:rgba(255,255,255,.15)!important;color:#fff!important}' +
             '.plex-hub__body{flex:1;min-height:0}' +
-            // Прозрачный перехватчик тапа поверх нативного .activity__loader —
-            // сам он клики не ловит и не отменяется, это только для нашего
-            // экрана-ожидания сезонов/серий (см. showPlexLoader).
+            // Прозрачный перехватчик тапа поверх спиннера — сам он клики не
+            // ловит и не отменяется, это только для нашего экрана-ожидания
+            // сезонов/серий (см. showPlexLoader).
             '.plex-loader-catcher{position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999}' +
-            // Родной .activity--load .activity__body{opacity:0} прячет контент
-            // полностью — по просьбе пользователя переопределяем именно для
-            // нашего экрана (маркер .plex-loader-dim ставится/снимается вместе
-            // с activity--load в showPlexLoader/hidePlexLoader) на лёгкое
-            // затемнение вместо полного исчезновения.
-            '.plex-loader-dim.activity--load .activity__body{opacity:.35!important}' +
+            // Показываем/затемняем напрямую, БЕЗ класса activity--load на
+            // предке .activity — именно снятие/навешивание activity--load
+            // ретриггерило родную анимацию появления карточки (animation-activity
+            // в app.css завязана на .activity:not(.activity--load) .activity__body),
+            // из-за чего экран «дёргался» при каждом переходе сезон/серия
+            // (см. комментарий над showPlexLoader). .activity__loader и так
+            // display:none по умолчанию — просто показываем его своим классом.
+            '.activity__loader.plex-loader-show{display:block}' +
+            '.activity__body.plex-loader-dim{opacity:.35!important}' +
             '</style>').appendTo('head');
     }
 

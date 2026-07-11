@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.1';
+    var PLUGIN_VERSION = '1.7.0';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1747,44 +1747,23 @@
     }
 
     // Соответствие полю сортировки Plex (используется, когда можно доверить
-    // сортировку и постраничную загрузку самому серверу — см. ниже). «Просмотрено»
-    // сюда намеренно не входит — у Plex нет родного ключа сортировки по «доле
-    // просмотра», см. plexWatchedProgress() и forceClientSide ниже.
+    // сортировку и постраничную загрузку самому серверу — см. ниже).
     var PLEX_NATIVE_SORT_KEY = {
         added: 'addedAt',
         title: 'titleSort',
         released: 'originallyAvailableAt',
         runtime: 'duration',
         percentage: 'rating',
-        my_rating: 'userRating'
+        my_rating: 'userRating',
+        watched: 'lastViewedAt'
     };
-
-    // «Просмотрено» — это степень завершённости, а не время последнего
-    // просмотра: не начато (0) → досмотрено частично (0..1 по доле) → досмотрено
-    // полностью (1). Раньше сортировали по «сырому» lastViewedAt — из-за этого
-    // сериал, отсмотренный ЧАСТИЧНО, но недавно, мог оказаться ниже старых, но
-    // полностью просмотренных тайтлов (сортировка по недавности, а не по факту
-    // «досмотрено ли») — пользователь ожидаемо счёл это неправильным: у сериала,
-    // который не досмотрен, «просмотренности» должно быть меньше, чем у
-    // полностью просмотренного, независимо от того, когда его смотрели.
-    function plexWatchedProgress(item) {
-        if (item.type === 'show') {
-            var total = Number(item.leafCount || 0);
-            var viewed = Number(item.viewedLeafCount || 0);
-            if (!total) return 0;
-            return Math.min(1, viewed / total);
-        }
-        if (Number(item.viewCount || 0) > 0) return 1;
-        if (item.viewOffset && item.duration) return Math.min(0.999, item.viewOffset / item.duration);
-        return 0;
-    }
 
     function plexSortValue(item, field) {
         if (field === 'released') return Number((item.originallyAvailableAt || '').slice(0, 4)) || Number(item.year || 0);
         if (field === 'runtime') return Number(item.duration || 0);
         if (field === 'percentage') return Number(item.rating || item.audienceRating || 0);
         if (field === 'my_rating') return Number(item.userRating || 0);
-        if (field === 'watched') return plexWatchedProgress(item);
+        if (field === 'watched') return Number(item.lastViewedAt || 0);
         if (field === 'added') return Number(item.addedAt || 0);
         return (item.titleSort || item.title || '').toLowerCase();
     }
@@ -1925,7 +1904,7 @@
         var pageSize = 50;
         var sectionKeys = object.plex_sections || [];
         var sort = object.plex_sort || { field: 'added', order: 'desc' };
-        var forceClientSide = sectionKeys.length > 1 || !!object.plex_year || !!object.plex_genre_title || !!object.plex_country_title || sort.field === 'random' || sort.field === 'watched';
+        var forceClientSide = sectionKeys.length > 1 || !!object.plex_year || !!object.plex_genre_title || !!object.plex_country_title || sort.field === 'random';
         var mergedItems = null;
 
         // Жанр/страна — ключи у каждой медиатеки свои (см. Api.genres/countries),

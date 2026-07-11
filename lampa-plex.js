@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.6.1';
+    var PLUGIN_VERSION = '1.7.0';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -249,6 +249,16 @@
             return plexRequest('/library/metadata/' + ratingKey + '/children').then(function (mc) {
                 return mc.Metadata || [];
             });
+        },
+
+        // Запускает на самом сервере Plex полное обновление метаданных медиатеки
+        // (аналог кнопки «Refresh Metadata» в Plex Web) — помогает, если у
+        // конкретного тайтла испорчена/устарела ссылка на постер или другие
+        // данные. Выполняется на сервере в фоне, ответ приходит сразу же, само
+        // обновление может занять значительное время в зависимости от размера
+        // библиотеки — plexRequest тут только подтверждает, что команда принята.
+        refreshSection: function (sectionKey) {
+            return plexRequest('/library/sections/' + sectionKey + '/refresh', { force: 1 }, 'PUT');
         }
     };
 
@@ -634,6 +644,41 @@
             onSelect: function (a) {
                 Lampa.Controller.toggle('settings_component');
                 if (a.action === 'confirm') syncTraktStatusesToPlex();
+            },
+            onBack: function () { Lampa.Controller.toggle('settings_component'); }
+        });
+    }
+
+    // Просит сам Plex Media Server заново обновить метаданные выбранных
+    // медиатек (постеры, описания, сопоставления) — по просьбе пользователя,
+    // столкнувшегося с испорченной ссылкой на постер у одного тайтла. Тяжёлая
+    // операция на стороне сервера (полное пересопоставление с локальными
+    // и онлайн-агентами), поэтому — подтверждение перед запуском, как и у
+    // синхронизации статусов Trakt → Plex.
+    function refreshPlexMetadata() {
+        resolveActiveSectionKeys().then(function (sectionKeys) {
+            if (!sectionKeys.length) { Lampa.Noty.show('Не выбраны медиатеки Plex в настройках'); return; }
+            return sectionKeys.reduce(function (prev, key) {
+                return prev.then(function () { return Api.refreshSection(key).catch(function () {}); });
+            }, Promise.resolve()).then(function () {
+                Lampa.Noty.show('Обновление метаданных запущено на сервере Plex — это может занять время в фоне');
+            });
+        }).catch(function () {
+            Lampa.Noty.show('Не удалось запустить обновление метаданных в Plex');
+        });
+    }
+
+    function confirmRefreshPlexMetadata() {
+        if (!isConfigured()) { Lampa.Noty.show('Сначала настройте подключение к Plex'); return; }
+        Lampa.Select.show({
+            title: 'Обновить метаданные в Plex?',
+            items: [
+                { title: 'Да, начать', action: 'confirm' },
+                { title: 'Отмена', action: 'cancel' }
+            ],
+            onSelect: function (a) {
+                Lampa.Controller.toggle('settings_component');
+                if (a.action === 'confirm') refreshPlexMetadata();
             },
             onBack: function () { Lampa.Controller.toggle('settings_component'); }
         });
@@ -1135,6 +1180,19 @@
                 Lampa.Noty.show('Обновляю кэш медиатеки Plex…');
                 rebuildTmdbIndex({ notify: true }).then(function () { Lampa.Settings.update(); });
             }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'plex',
+            param: { name: 'plex_refresh_metadata', type: 'button' },
+            field: { name: 'Обновить метаданные в Plex', description: 'Просит сам сервер Plex заново обновить метаданные выбранных медиатек (аналог кнопки «Refresh Metadata» в Plex) — помогает, если постер или другие данные конкретного тайтла испорчены или устарели. Выполняется на сервере в фоне, может занять время.' },
+            onChange: function () { confirmRefreshPlexMetadata(); }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'plex',
+            param: { name: 'plex_poster_source_tmdb', type: 'trigger', default: false },
+            field: { name: 'Обложки из TMDB', description: 'Показывать в «Plex» постеры с TMDB вместо постеров из самого Plex — если в Plex обложки другие (свои/нестандартные), в Lampa всё будет выглядеть единообразно, как в остальных каталогах. Требует доп. запрос к TMDB на каждую карточку — может немного замедлить загрузку сетки.' }
         });
 
         sectionHeader('plex_playback_section', 'Воспроизведение');
@@ -1785,6 +1843,49 @@
     }
 
     // ---------------------------------------------------------------------
+    // Обложки из TMDB вместо Plex (по желанию пользователя — настройка
+    // «Обложки из TMDB») — чтобы в сетке «Plex» все постеры выглядели
+    // единообразно, даже если в самом Plex у части тайтлов стоят свои/другие
+    // обложки. Используем публичный ключ и image-прокси самой Lampa
+    // (Lampa.TMDB.key()/.image()) — тот же, которым Lampa грузит постеры в
+    // остальных каталогах, отдельный TMDB API-ключ плагину не нужен.
+    // ---------------------------------------------------------------------
+
+    function usePlexTmdbPosters() {
+        return Lampa.Storage.get('plex_poster_source_tmdb', false) === true;
+    }
+
+    function fetchTmdbPosterUrl(id, method) {
+        return new Promise(function (resolve) {
+            $.ajax({
+                url: Lampa.TMDB.api((method === 'tv' ? 'tv/' : 'movie/') + id + '?api_key=' + Lampa.TMDB.key() + '&language=ru'),
+                dataType: 'json',
+                timeout: 10000
+            }).done(function (data) {
+                var path = data && data.poster_path;
+                resolve(path ? Lampa.TMDB.image('t/p/w500' + path) : null);
+            }).fail(function () { resolve(null); });
+        });
+    }
+
+    // Подменяет poster/img только у карточек с известным tmdb id — карточки
+    // без сопоставления с TMDB (нет данных, чтобы что-то подменить) остаются
+    // с постером из Plex, как и раньше. Ошибка запроса к TMDB для отдельной
+    // карточки — просто оставляем постер Plex для неё же, не валим всю
+    // страницу целиком.
+    function applyTmdbPosters(results) {
+        if (!usePlexTmdbPosters()) return Promise.resolve(results);
+        var withId = results.filter(function (r) { return r.id && (r.method === 'movie' || r.method === 'tv'); });
+        if (!withId.length) return Promise.resolve(results);
+
+        return Promise.all(withId.map(function (r) {
+            return fetchTmdbPosterUrl(r.id, r.method).then(function (url) {
+                if (url) { r.poster = url; r.img = url; }
+            });
+        })).then(function () { return results; });
+    }
+
+    // ---------------------------------------------------------------------
     // Компонент "Медиатека Plex" (сетка карточек)
     // ---------------------------------------------------------------------
 
@@ -1833,6 +1934,8 @@
                 totalPages = Math.max(1, Math.ceil(items.length / pageSize));
                 var start = (pageNum - 1) * pageSize;
                 var results = items.slice(start, start + pageSize).map(toCard);
+                return applyTmdbPosters(results);
+            }).then(function (results) {
                 resolve({ results: results, total_pages: totalPages, page: pageNum });
             }).catch(function () { reject(); });
         }
@@ -1844,6 +1947,8 @@
             Api.list(sectionKeys[0], opts).then(function (data) {
                 totalPages = Math.max(1, Math.ceil(data.totalSize / pageSize));
                 var results = data.items.map(toCard);
+                return applyTmdbPosters(results);
+            }).then(function (results) {
                 resolve({ results: results, total_pages: totalPages, page: pageNum });
             }).catch(function () { reject(); });
         }

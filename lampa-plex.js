@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.5.0';
+    var PLUGIN_VERSION = '1.5.1';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1773,6 +1773,20 @@
                     onEnter: function () { onCardEnter(element); },
                     onFocus: function () { Lampa.Background.change(Lampa.Utils.cardImgBackground(element)); }
                 });
+
+                // Бейджи LampaTrakt (просмотрено/смотрю/хочу посмотреть/дата
+                // релиза) вешаются самим LampaTrakt только на карточки внутри
+                // его собственных хабов (прямой вызов в его onInstance, а не
+                // через общее событие 'catalog'/'line') — карточки чужих
+                // сеток, включая нашу, он сам не видит. LampaTrakt v3.2.50+
+                // публикует applyBadges специально для таких внешних сеток;
+                // безопасна для повторного вызова и ничего не делает, если
+                // LampaTrakt не установлен или у карточки нет tmdb id/типа
+                // (элементы Plex без сопоставления с TMDB — у них этих полей
+                // нет вовсе, для них бейджи принципиально невозможны).
+                if (window.TraktTV && typeof window.TraktTV.applyBadges === 'function') {
+                    window.TraktTV.applyBadges(card);
+                }
             }
         });
 

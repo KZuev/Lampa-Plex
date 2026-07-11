@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.5.2';
+    var PLUGIN_VERSION = '1.6.0';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -122,7 +122,14 @@
             'X-Plex-Product': PLEX_PRODUCT,
             'X-Plex-Version': PLUGIN_VERSION,
             'X-Plex-Device-Name': 'Lampa',
-            'X-Plex-Platform': 'Lampa'
+            'X-Plex-Platform': 'Lampa',
+            // Plex локализует стандартные названия жанров/стран (список
+            // значений фильтра /library/sections/{key}/genre|country) по этому
+            // параметру — без него отдаёт то, что есть в таблице по умолчанию
+            // (обычно английский), из-за чего часть жанров показывалась не на
+            // русском. Весь остальной интерфейс плагина и так жёстко на
+            // русском, отдельный переключатель не нужен.
+            'X-Plex-Language': 'ru'
         };
     }
 
@@ -1102,6 +1109,17 @@
 
         Lampa.SettingsApi.addParam({
             component: 'plex',
+            param: { name: 'plex_default_sort', type: 'button' },
+            field: { name: 'Сортировка по умолчанию', description: 'С какой сортировки открывается «Plex» в левом меню. Повторный выбор того же пункта переключает направление — так же, как кнопка «Сортировка» внутри самого раздела.' },
+            onRender: function (item) {
+                item.find('.plex-field-status').remove();
+                item.append('<div class="settings-param__value plex-field-status" style="font-size:.85em;opacity:.65">' + escapeHtml(sortLabelWithArrow(getDefaultSort())) + '</div>');
+            },
+            onChange: function () { openDefaultSortPicker(); }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'plex',
             param: { name: 'plex_rebuild_index', type: 'button' },
             field: { name: 'Обновить кэш медиатеки', description: 'Нужен, чтобы кнопка «Смотреть из Plex» показывалась на любой карточке фильма/сериала, а не только после захода в «Медиатеку Plex»' },
             onRender: function (item) {
@@ -1618,6 +1636,49 @@
         watched: 'Просмотрено'
     };
     var PLEX_SORT_ORDER = ['added', 'title', 'released', 'runtime', 'random', 'percentage', 'my_rating', 'watched'];
+
+    // Сортировка по умолчанию — настраивается в Настройки → Plex, используется
+    // как стартовое состояние `activeSort` при открытии «Plex» в левом меню.
+    function getDefaultSort() {
+        var field = Lampa.Storage.get('plex_default_sort_field', 'added');
+        if (PLEX_SORT_ORDER.indexOf(field) < 0) field = 'added';
+        var order = Lampa.Storage.get('plex_default_sort_order', 'desc');
+        if (order !== 'asc' && order !== 'desc') order = 'desc';
+        return { field: field, order: order };
+    }
+
+    function setDefaultSort(field, order) {
+        Lampa.Storage.set('plex_default_sort_field', field);
+        Lampa.Storage.set('plex_default_sort_order', order);
+    }
+
+    function sortLabelWithArrow(sort) {
+        if (sort.field === 'random') return PLEX_SORT_LABELS.random;
+        return PLEX_SORT_LABELS[sort.field] + ' ' + (sort.order === 'desc' ? '↓' : '↑');
+    }
+
+    // Тот же приём выбора, что и у кнопки «Сортировка» внутри «Plex»
+    // (openSortMenu в plex_hub): повторный выбор уже выбранного пункта
+    // переключает направление вместо повторного выставления 'asc'.
+    function openDefaultSortPicker() {
+        var current = getDefaultSort();
+        var items = PLEX_SORT_ORDER.map(function (field) {
+            var suffix = (current.field === field && field !== 'random') ? ('  ' + (current.order === 'desc' ? '↓' : '↑')) : '';
+            return { title: PLEX_SORT_LABELS[field] + suffix, field: field, selected: current.field === field };
+        });
+
+        Lampa.Select.show({
+            title: 'Сортировка по умолчанию',
+            items: items,
+            onSelect: function (a) {
+                var order = (current.field === a.field && current.order === 'asc') ? 'desc' : 'asc';
+                setDefaultSort(a.field, order);
+                Lampa.Settings.update();
+            },
+            onBack: function () { Lampa.Controller.toggle('settings_component'); }
+        });
+    }
+
     // Соответствие полю сортировки Plex (используется, когда можно доверить
     // сортировку и постраничную загрузку самому серверу — см. ниже).
     var PLEX_NATIVE_SORT_KEY = {
@@ -1870,7 +1931,7 @@
         var activeGenreBySection = null;
         var activeCountryTitle = '';
         var activeCountryBySection = null;
-        var activeSort = { field: 'added', order: 'desc' };
+        var activeSort = getDefaultSort();
         var libraryBtn, yearBtn, genreBtn, countryBtn, sortBtn;
         var genreOptionsPromise = null;
         var countryOptionsPromise = null;
@@ -1890,10 +1951,7 @@
         function getGenreLabel() { return activeGenreTitle || 'Жанр'; }
         function getCountryLabel() { return activeCountryTitle || 'Страна'; }
 
-        function getSortLabel() {
-            if (activeSort.field === 'random') return PLEX_SORT_LABELS.random;
-            return PLEX_SORT_LABELS[activeSort.field] + ' ' + (activeSort.order === 'desc' ? '↓' : '↑');
-        }
+        function getSortLabel() { return sortLabelWithArrow(activeSort); }
 
         // Подсветка активной кнопки/фокуса — целиком через CSS-класс
         // .plex-hub__filter--active (см. injectStyles), как в LampaTrakt, без

@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.5';
+    var PLUGIN_VERSION = '1.7.6';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1446,8 +1446,16 @@
     var _plexLoaderActivity = null;
     var _plexLoaderCatcher = null;
 
+    // showPlexLoader() умеет «переиспользоваться»: если следующий шаг цепочки
+    // (например, openSeasonPicker сразу после того, как injectPlexButton уже
+    // показал индикатор на время загрузки метаданных) вызывает его снова,
+    // пока предыдущий ещё не скрыт — возвращаем тот же самый {cancelled}, не
+    // трогая DOM/классы повторно. Без этого между двумя последовательными
+    // запросами (metadata → children) индикатор гасился и тут же снова
+    // показывался — то самое дёрганье экрана, о котором сообщил пользователь.
     function showPlexLoader() {
-        hidePlexLoader();
+        if (_plexLoaderState) return _plexLoaderState;
+
         var state = { cancelled: false };
         _plexLoaderState = state;
 
@@ -1464,11 +1472,11 @@
         var catcher = $('<div class="plex-loader-catcher"></div>');
         $('body').append(catcher);
         _plexLoaderCatcher = catcher;
-        catcher.on('click', function () { hidePlexLoader(); });
+        catcher.on('click', function () { cancelPlexLoader(); });
 
         Lampa.Controller.add(PLEX_LOADER_CTRL, {
             toggle: function () {},
-            back: function () { hidePlexLoader(); },
+            back: function () { cancelPlexLoader(); },
             up: function () {},
             down: function () {},
             left: function () {},
@@ -1479,6 +1487,12 @@
         return state;
     }
 
+    // Просто скрывает индикатор — используется, когда следующим шагом сразу
+    // открывается Select/модалка (та сама возьмёт контроллер на себя, поэтому
+    // здесь НЕ восстанавливаем фокус на 'content' — лишний промежуточный
+    // Controller.toggle('content') прямо перед открытием Select и был второй
+    // причиной дёрганья экрана: фокус/скролл на миг прыгал на список карточек
+    // и тут же перескакивал на Select).
     function hidePlexLoader() {
         if (_plexLoaderState) { _plexLoaderState.cancelled = true; _plexLoaderState = null; }
         if (_plexLoaderActivity) {
@@ -1487,6 +1501,13 @@
             _plexLoaderActivity = null;
         }
         if (_plexLoaderCatcher) { _plexLoaderCatcher.remove(); _plexLoaderCatcher = null; }
+    }
+
+    // Отмена пользователем (тап в любое место / «назад» на пульте) — в этом
+    // случае дальше ничего не откроется само, поэтому фокус нужно вернуть
+    // явно.
+    function cancelPlexLoader() {
+        hidePlexLoader();
         Lampa.Controller.toggle('content');
     }
 
@@ -1505,7 +1526,7 @@
             });
         }).catch(function () {
             if (loader.cancelled) return;
-            hidePlexLoader();
+            cancelPlexLoader();
             Lampa.Noty.show('Не удалось получить сезоны');
         });
     }
@@ -1515,7 +1536,7 @@
         Api.children(season.ratingKey).then(function (children) {
             if (loader.cancelled) return;
             var episodes = children.filter(function (e) { return e.type === 'episode'; });
-            if (!episodes.length) { hidePlexLoader(); Lampa.Noty.show('Серии не найдены'); return; }
+            if (!episodes.length) { cancelPlexLoader(); Lampa.Noty.show('Серии не найдены'); return; }
 
             var useTrakt = traktStatusEnabled();
             var showTmdbId = useTrakt ? findTmdbId(showMeta) : null;
@@ -1550,7 +1571,7 @@
             });
         }).catch(function () {
             if (loader.cancelled) return;
-            hidePlexLoader();
+            cancelPlexLoader();
             Lampa.Noty.show('Не удалось получить серии');
         });
     }
@@ -2410,11 +2431,15 @@
                     var loader = showPlexLoader();
                     Api.metadata(match.ratingKey).then(function (meta) {
                         if (loader.cancelled) return;
-                        hidePlexLoader();
+                        // Индикатор НЕ гасим здесь — openSeasonPicker сразу же
+                        // показывает его снова на время своего собственного
+                        // запроса (сезонов); showPlexLoader() увидит, что один
+                        // уже активен, и переиспользует его без лишнего
+                        // мигания (см. комментарий в showPlexLoader).
                         openSeasonPicker(meta);
                     }).catch(function () {
                         if (loader.cancelled) return;
-                        hidePlexLoader();
+                        cancelPlexLoader();
                         Lampa.Noty.show('Не удалось получить данные Plex');
                     });
                 } else {

@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.4';
+    var PLUGIN_VERSION = '1.7.5';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1453,7 +1453,13 @@
 
         var active = Lampa.Activity.active();
         _plexLoaderActivity = (active && active.activity && typeof active.activity.loader === 'function') ? active.activity : null;
-        if (_plexLoaderActivity) _plexLoaderActivity.loader(true);
+        if (_plexLoaderActivity) {
+            _plexLoaderActivity.loader(true);
+            // Родной .activity--load полностью прячет контент под спиннером
+            // (opacity:0) — по просьбе пользователя вместо исчезновения делаем
+            // лёгкое затемнение (см. правило .plex-loader-dim в injectStyles).
+            if (_plexLoaderActivity.slide) _plexLoaderActivity.slide.addClass('plex-loader-dim');
+        }
 
         var catcher = $('<div class="plex-loader-catcher"></div>');
         $('body').append(catcher);
@@ -1475,7 +1481,11 @@
 
     function hidePlexLoader() {
         if (_plexLoaderState) { _plexLoaderState.cancelled = true; _plexLoaderState = null; }
-        if (_plexLoaderActivity) { _plexLoaderActivity.loader(false); _plexLoaderActivity = null; }
+        if (_plexLoaderActivity) {
+            if (_plexLoaderActivity.slide) _plexLoaderActivity.slide.removeClass('plex-loader-dim');
+            _plexLoaderActivity.loader(false);
+            _plexLoaderActivity = null;
+        }
         if (_plexLoaderCatcher) { _plexLoaderCatcher.remove(); _plexLoaderCatcher = null; }
         Lampa.Controller.toggle('content');
     }
@@ -2462,6 +2472,12 @@
             // сам он клики не ловит и не отменяется, это только для нашего
             // экрана-ожидания сезонов/серий (см. showPlexLoader).
             '.plex-loader-catcher{position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999}' +
+            // Родной .activity--load .activity__body{opacity:0} прячет контент
+            // полностью — по просьбе пользователя переопределяем именно для
+            // нашего экрана (маркер .plex-loader-dim ставится/снимается вместе
+            // с activity--load в showPlexLoader/hidePlexLoader) на лёгкое
+            // затемнение вместо полного исчезновения.
+            '.plex-loader-dim.activity--load .activity__body{opacity:.35!important}' +
             '</style>').appendTo('head');
     }
 

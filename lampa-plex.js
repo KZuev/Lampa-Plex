@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.7';
+    var PLUGIN_VERSION = '1.7.8';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1447,10 +1447,18 @@
     // ---------------------------------------------------------------------
 
     var PLEX_LOADER_CTRL = 'plex_loader_ctrl';
+    // Показываем спиннер/затемнение только если запрос реально затянулся —
+    // при быстром ответе (кэш, локальная сеть) индикатор успевал появиться и
+    // тут же исчезнуть за доли секунды, что само по себе выглядело как
+    // моргание/дёрганье, даже без анимации карточки из предыдущего фикса.
+    // По истечении этой задержки от старта запроса решаем, показывать ли
+    // визуал вообще.
+    var PLEX_LOADER_DELAY = 250;
     var _plexLoaderState = null;
     var _plexLoaderActivity = null;
     var _plexLoaderIcon = null;
     var _plexLoaderCatcher = null;
+    var _plexLoaderShowTimer = null;
 
     // showPlexLoader() умеет «переиспользоваться»: если следующий шаг цепочки
     // (например, openSeasonPicker сразу после того, как injectPlexButton уже
@@ -1467,11 +1475,18 @@
 
         var active = Lampa.Activity.active();
         _plexLoaderActivity = (active && active.activity && active.activity.slide) ? active.activity : null;
-        if (_plexLoaderActivity) {
-            _plexLoaderIcon = _plexLoaderActivity.slide.find('.activity__loader');
-            _plexLoaderIcon.addClass('plex-loader-show');
-            if (_plexLoaderActivity.body) _plexLoaderActivity.body.addClass('plex-loader-dim');
-        }
+
+        // Визуал (спиннер + затемнение) откладываем на PLEX_LOADER_DELAY —
+        // если к этому моменту hidePlexLoader()/cancelPlexLoader() уже
+        // отменит таймер, ничего на экране вообще не появится.
+        _plexLoaderShowTimer = setTimeout(function () {
+            _plexLoaderShowTimer = null;
+            if (_plexLoaderActivity) {
+                _plexLoaderIcon = _plexLoaderActivity.slide.find('.activity__loader');
+                _plexLoaderIcon.addClass('plex-loader-show');
+                if (_plexLoaderActivity.body) _plexLoaderActivity.body.addClass('plex-loader-dim');
+            }
+        }, PLEX_LOADER_DELAY);
 
         var catcher = $('<div class="plex-loader-catcher"></div>');
         $('body').append(catcher);
@@ -1499,6 +1514,7 @@
     // же перескакивал на Select).
     function hidePlexLoader() {
         if (_plexLoaderState) { _plexLoaderState.cancelled = true; _plexLoaderState = null; }
+        if (_plexLoaderShowTimer) { clearTimeout(_plexLoaderShowTimer); _plexLoaderShowTimer = null; }
         if (_plexLoaderIcon) { _plexLoaderIcon.removeClass('plex-loader-show'); _plexLoaderIcon = null; }
         if (_plexLoaderActivity) {
             if (_plexLoaderActivity.body) _plexLoaderActivity.body.removeClass('plex-loader-dim');

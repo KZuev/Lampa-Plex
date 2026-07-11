@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.3';
+    var PLUGIN_VERSION = '1.7.4';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1418,43 +1418,66 @@
     }
 
     // ---------------------------------------------------------------------
-    // Индикатор загрузки, пока грузятся сезоны/серии (иногда несколько
-    // последовательных запросов к Plex/Trakt подряд, без него экран как будто
-    // завис). Раньше был собственный оверлей+спиннер на голых CSS-em — на
-    // iPhone размер спиннера оказался заметно мельче, чем у родного индикатора
-    // Lampa (на Apple TV, где масштаб em/rem для «десятифутового» интерфейса
-    // другой, совпадало случайно). Вместо подбора своих единиц — используем
-    // сам родной `Lampa.Loading` (interaction/loading.js, публикуется на
-    // `window.Lampa.Loading`): тот же слой `.loading-layer`/`.loading-layer__ico`,
-    // что и у любого другого индикатора загрузки в Lampa, поэтому размер
-    // гарантированно совпадает с остальным приложением на любой платформе.
-    // Бонус: `Lampa.Loading` сам восстанавливает тот Controller, что был
-    // активен ДО показа (а не жёстко 'content', как было у нас), и сам вешает
-    // отмену на «назад» И на любую стрелку направления (не только «назад»).
-    // Сохраняем прежний внешний интерфейс (showPlexLoader()/hidePlexLoader()),
-    // чтобы не переписывать вызывающий код в openSeasonPicker/openEpisodePicker
-    // и injectPlexButton.
+    // Индикатор загрузки, пока грузятся сезоны/серии. Пробовали `Lampa.Loading`
+    // (родной слой `.loading-layer`) — оказалось, что это ДРУГОЙ нативный
+    // индикатор: маленькое кольцо в текстовой плашке «Загрузка» внизу экрана,
+    // не то, что пользователь имел в виду («большое кольцо по центру»). Тот,
+    // что имелся в виду — родной оверлей самой Activity (`.activity__loader`,
+    // `interaction/activity/slide.js`: `ActivitySlide.loader(status)` просто
+    // toggle-ит класс `activity--load`, у которого в CSS — затемнение
+    // `.activity__body{opacity:0}` и `.activity__loader{background:url(loader.svg)
+    // no-repeat 50% 50%}` НА ВЕСЬ экран активности, отсюда и «большое, по
+    // центру»); он используется, например, встроенным `Lampa.Maker`'ом Category
+    // (`this.activity.loader(true)`), поэтому пользователь и узнаёт его —
+    // ровно тот же спиннер, что при обычной загрузке каталога.
+    // Получаем этот же экземпляр для ТЕКУЩЕЙ (видимой) активности через
+    // `Lampa.Activity.active().activity` (тот самый `ActivitySlide`) — без
+    // этого у нас нет доступа к `.loader()`, т.к. вызывается не изнутри
+    // жизненного цикла компонента, а из обработчика кнопки/выбора сезона.
+    // У этого нативного оверлея НЕТ своей отмены по тапу/«назад» (в обычных
+    // сценариях Lampa он и не должен отменяться) — специально для нашего
+    // случая (пользователь просил именно такую отмену) добавляем поверх
+    // невидимый перехватчик клика на весь экран + временный Controller,
+    // реагирующий на «назад».
     // ---------------------------------------------------------------------
 
+    var PLEX_LOADER_CTRL = 'plex_loader_ctrl';
     var _plexLoaderState = null;
+    var _plexLoaderActivity = null;
+    var _plexLoaderCatcher = null;
 
     function showPlexLoader() {
         hidePlexLoader();
         var state = { cancelled: false };
         _plexLoaderState = state;
 
-        Lampa.Loading.start(function () {
-            state.cancelled = true;
-            Lampa.Loading.stop();
-            if (_plexLoaderState === state) _plexLoaderState = null;
+        var active = Lampa.Activity.active();
+        _plexLoaderActivity = (active && active.activity && typeof active.activity.loader === 'function') ? active.activity : null;
+        if (_plexLoaderActivity) _plexLoaderActivity.loader(true);
+
+        var catcher = $('<div class="plex-loader-catcher"></div>');
+        $('body').append(catcher);
+        _plexLoaderCatcher = catcher;
+        catcher.on('click', function () { hidePlexLoader(); });
+
+        Lampa.Controller.add(PLEX_LOADER_CTRL, {
+            toggle: function () {},
+            back: function () { hidePlexLoader(); },
+            up: function () {},
+            down: function () {},
+            left: function () {},
+            right: function () {}
         });
+        Lampa.Controller.toggle(PLEX_LOADER_CTRL);
 
         return state;
     }
 
     function hidePlexLoader() {
         if (_plexLoaderState) { _plexLoaderState.cancelled = true; _plexLoaderState = null; }
-        Lampa.Loading.stop();
+        if (_plexLoaderActivity) { _plexLoaderActivity.loader(false); _plexLoaderActivity = null; }
+        if (_plexLoaderCatcher) { _plexLoaderCatcher.remove(); _plexLoaderCatcher = null; }
+        Lampa.Controller.toggle('content');
     }
 
     function openSeasonPicker(showMeta) {
@@ -2435,6 +2458,10 @@
             '.plex-hub__filters .plex-hub__filter--active{background:rgba(229,160,13,.18)!important;border-bottom:3px solid #e5a00d;box-shadow:inset 0 0 0 1px rgba(229,160,13,.3)}' +
             '.plex-hub__filters .plex-hub__filter.focus,.plex-hub__filters .plex-hub__filter.hover{background-color:rgba(255,255,255,.15)!important;color:#fff!important}' +
             '.plex-hub__body{flex:1;min-height:0}' +
+            // Прозрачный перехватчик тапа поверх нативного .activity__loader —
+            // сам он клики не ловит и не отменяется, это только для нашего
+            // экрана-ожидания сезонов/серий (см. showPlexLoader).
+            '.plex-loader-catcher{position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999}' +
             '</style>').appendTo('head');
     }
 

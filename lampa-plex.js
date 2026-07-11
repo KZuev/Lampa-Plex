@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.8';
+    var PLUGIN_VERSION = '1.7.9';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1446,6 +1446,18 @@
     // реагирующий на «назад».
     // ---------------------------------------------------------------------
 
+    // Снятие классов индикатора (hidePlexLoader) и открытие Lampa.Select —
+    // это две отдельные операции с DOM/CSS-переходами (наше затемнение и
+    // родной transform-слайд панели), падающие в один и тот же тик. На
+    // слабых устройствах браузер не успевает отрисовать одно раньше другого,
+    // из-за чего родной 0.2s-слайд панели визуально дёргается/растягивается
+    // (жалоба «панель выезжает как будто за секунду»). Разносим их по
+    // разным кадрам через requestAnimationFrame — сначала гасим индикатор
+    // и даём кадру отрисоваться, потом уже открываем Select.
+    function deferPaint(fn) {
+        (window.requestAnimationFrame || function (cb) { setTimeout(cb, 16); })(fn);
+    }
+
     var PLEX_LOADER_CTRL = 'plex_loader_ctrl';
     // Показываем спиннер/затемнение только если запрос реально затянулся —
     // при быстром ответе (кэш, локальная сеть) индикатор успевал появиться и
@@ -1538,11 +1550,13 @@
             hidePlexLoader();
             var seasons = children.filter(function (s) { return s.type === 'season'; });
             if (!seasons.length) { Lampa.Noty.show('Сезоны не найдены'); return; }
-            Lampa.Select.show({
-                title: showMeta.title,
-                items: seasons.map(function (s) { return { title: s.title || ('Сезон ' + s.index), s: s }; }),
-                onSelect: function (a) { openEpisodePicker(showMeta, a.s); },
-                onBack: function () { Lampa.Controller.toggle('content'); }
+            deferPaint(function () {
+                Lampa.Select.show({
+                    title: showMeta.title,
+                    items: seasons.map(function (s) { return { title: s.title || ('Сезон ' + s.index), s: s }; }),
+                    onSelect: function (a) { openEpisodePicker(showMeta, a.s); },
+                    onBack: function () { Lampa.Controller.toggle('content'); }
+                });
             });
         }).catch(function () {
             if (loader.cancelled) return;
@@ -1577,16 +1591,18 @@
                     return watched ? 'Просмотрено' : (progress ? progress + '%' : '');
                 }
 
-                Lampa.Select.show({
-                    title: season.title || ('Сезон ' + season.index),
-                    items: episodes.map(function (e) {
-                        return { title: e.index + '. ' + (e.title || ''), subtitle: episodeSubtitle(e), e: e };
-                    }),
-                    onSelect: function (a) {
-                        var idx = episodes.indexOf(a.e);
-                        playEpisode(a.e, showMeta, episodes.slice(idx + 1));
-                    },
-                    onBack: function () { openSeasonPicker(showMeta); }
+                deferPaint(function () {
+                    Lampa.Select.show({
+                        title: season.title || ('Сезон ' + season.index),
+                        items: episodes.map(function (e) {
+                            return { title: e.index + '. ' + (e.title || ''), subtitle: episodeSubtitle(e), e: e };
+                        }),
+                        onSelect: function (a) {
+                            var idx = episodes.indexOf(a.e);
+                            playEpisode(a.e, showMeta, episodes.slice(idx + 1));
+                        },
+                        onBack: function () { openSeasonPicker(showMeta); }
+                    });
                 });
             });
         }).catch(function () {

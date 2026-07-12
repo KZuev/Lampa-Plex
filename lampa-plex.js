@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.10';
+    var PLUGIN_VERSION = '1.7.11';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -259,6 +259,15 @@
         // библиотеки — plexRequest тут только подтверждает, что команда принята.
         refreshSection: function (sectionKey) {
             return plexRequest('/library/sections/' + sectionKey + '/refresh', { force: 1 }, 'PUT');
+        },
+
+        // Удаляет элемент библиотеки с сервера Plex целиком (сам файл(ы) на
+        // диске тоже удаляются самим Plex-сервером — как кнопка «Delete»
+        // в официальном клиенте). Сервер вернёт ошибку, если в его
+        // настройках выключено «Allow Media Deletion» — тогда просто
+        // сообщаем о неудаче, ничего не делаем локально.
+        deleteMetadata: function (ratingKey) {
+            return plexRequest('/library/metadata/' + ratingKey, {}, 'DELETE');
         }
     };
 
@@ -2433,16 +2442,81 @@
         return _plexButtonHash;
     }
 
+    // Сопоставление текущей открытой карточки с Plex, запомненное на момент
+    // 'complite' — переиспользуется в обработчике 'options' (см. ниже), у
+    // которого события отдают только `link`/`props`, без tmdb id и метода
+    // напрямую; сопоставлять заново там не нужно — карточка не меняется
+    // между 'complite' и открытием пользователем меню «Ещё» той же карточки.
+    var _currentPlexCardMatch = null;
+
     function initFullCardHook() {
         Lampa.Listener.follow('full', function (e) {
-            if (e.type !== 'complite') return;
-            if (!isConfigured() || !e.data || !e.data.id || !e.object) return;
+            if (e.type === 'complite') {
+                if (!isConfigured() || !e.data || !e.data.id || !e.object) { _currentPlexCardMatch = null; return; }
 
-            var method = e.object.method === 'tv' ? 'tv' : 'movie';
-            var match = _plexTmdbIndex[method + ':' + e.data.id];
+                var method = e.object.method === 'tv' ? 'tv' : 'movie';
+                var match = _plexTmdbIndex[method + ':' + e.data.id];
 
-            if (match) injectPlexButton(e, match, method);
-            else restorePlexPriorityIfNeeded();
+                _currentPlexCardMatch = match ? { ratingKey: match.ratingKey, method: method, tmdbId: e.data.id, title: e.data.title || e.data.name || '' } : null;
+
+                if (match) injectPlexButton(e, match, method);
+                else restorePlexPriorityIfNeeded();
+            }
+            else if (e.type === 'options' && _currentPlexCardMatch) {
+                // Пункт «Ещё» на родной карточке (`components/full/start/options.js`)
+                // рассылает `Lampa.Listener.send('full', {type:'options', options, ...})`
+                // с ПУСТЫМ мутируемым массивом `options` — плагины наполняют его
+                // своими пунктами перед тем, как сам компонент откроет
+                // `Lampa.Select.show({items: options, ...})`. Собственного onSelect
+                // у нашего пункта достаточно — родной fallback onSelect/onBack
+                // (`Controller.toggle('content')`) сработает только для пунктов
+                // БЕЗ своего onSelect, поэтому дублируем его в своём обработчике.
+                e.options.push({
+                    title: 'Удалить из Plex',
+                    onSelect: function () {
+                        Lampa.Controller.toggle('content');
+                        confirmDeleteFromPlex(_currentPlexCardMatch);
+                    }
+                });
+            }
+        });
+    }
+
+    function confirmDeleteFromPlex(info) {
+        Lampa.Select.show({
+            title: 'Удалить' + (info.title ? ' «' + info.title + '»' : '') + ' из Plex?',
+            items: [
+                { title: 'Да, удалить', action: 'confirm' },
+                { title: 'Отмена', action: 'cancel' }
+            ],
+            onSelect: function (a) {
+                Lampa.Controller.toggle('content');
+                if (a.action === 'confirm') deleteFromPlex(info);
+            },
+            onBack: function () { Lampa.Controller.toggle('content'); }
+        });
+    }
+
+    // Полное удаление с сервера Plex (сам сервер удаляет и файл(ы) на диске —
+    // как кнопка «Delete» в официальном клиенте; вернёт ошибку, если на
+    // сервере выключено «Allow Media Deletion»). После успеха вычищаем
+    // элемент из локального индекса и снимаем нашу кнопку/закрепление с
+    // текущей карточки — она больше не доступна в Plex.
+    function deleteFromPlex(info) {
+        Api.deleteMetadata(info.ratingKey).then(function () {
+            Lampa.Noty.show('Удалено из Plex' + (info.title ? ': ' + info.title : ''));
+
+            delete _plexTmdbIndex[info.method + ':' + info.tmdbId];
+            setStoredTmdbIndex(_plexTmdbIndex);
+
+            if (_currentPlexCardMatch === info) _currentPlexCardMatch = null;
+
+            var active = Lampa.Activity.active();
+            var root = active && active.activity && typeof active.activity.render === 'function' ? active.activity.render() : null;
+            if (root) root.find('.plex-watch-btn').remove();
+            restorePlexPriorityIfNeeded();
+        }).catch(function () {
+            Lampa.Noty.show('Не удалось удалить из Plex — проверьте, что на сервере включено «Allow Media Deletion»');
         });
     }
 

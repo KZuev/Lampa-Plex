@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.16';
+    var PLUGIN_VERSION = '1.7.17';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1115,6 +1115,74 @@
         });
     }
 
+    // Раньше каждая диагностика была своей отдельной строкой настроек
+    // (собственный onRender со статусом, собственная кнопка) — по образцу
+    // LampaTrakt (там же — один пункт «Отладка», открывающий Select со
+    // списком всех диагностик) собрали всё в одно место: один пункт «Отладка»
+    // → Lampa.Select с текущим статусом каждой проверки в subtitle (считается
+    // заново при каждом открытии меню, поэтому всегда актуален) и выбором,
+    // какую диагностику запустить.
+    function plexDebugMenuItems() {
+        var items = [];
+
+        if (traktAvailable()) {
+            var traktStatus;
+            if (!traktConfigured()) {
+                traktStatus = 'не найдены client_id/токен Trakt — войдите в LampaTrakt';
+            } else if (_traktLastFetch.ok === true) {
+                traktStatus = 'ок, ' + new Date(_traktLastFetch.at).toLocaleString() + ' — фильмов: ' + _traktLastFetch.movies + ', сериалов: ' + _traktLastFetch.shows;
+            } else if (_traktLastFetch.ok === false) {
+                traktStatus = 'ошибка (' + new Date(_traktLastFetch.at).toLocaleString() + '): ' + _traktLastFetch.error;
+            } else {
+                traktStatus = 'ещё не проверялось';
+            }
+            items.push({ title: 'Проверить подключение к Trakt', subtitle: traktStatus, action: 'trakt_status' });
+
+            var badgesStatus;
+            if (!_plexBadgesLastAttempt) {
+                badgesStatus = 'ещё не было карточек — откройте раздел «Plex», затем сюда';
+            } else {
+                var a = _plexBadgesLastAttempt;
+                var when = new Date(a.at).toLocaleString();
+                if (!a.available) badgesStatus = when + ' — window.TraktTV.applyBadges не найден';
+                else if (a.error) badgesStatus = when + ' — ошибка внутри applyBadges: ' + a.error;
+                else badgesStatus = when + ' — вызван без ошибок (id: ' + (a.id || '—') + ', тип: ' + (a.method || '—') + ')';
+            }
+            items.push({ title: 'Проверить бейджи LampaTrakt на медиатеке', subtitle: badgesStatus, action: 'badges' });
+        }
+
+        items.push({
+            title: 'Тест: перейти в раздел «Плекс»',
+            subtitle: 'Тот же переход, что должен происходить после удаления из Plex — без самого удаления',
+            action: 'return_to_hub'
+        });
+
+        return items;
+    }
+
+    function openPlexDebugMenu() {
+        Lampa.Select.show({
+            title: 'Отладка',
+            items: plexDebugMenuItems(),
+            onSelect: function (item) {
+                if (!item) return;
+                if (item.action === 'trakt_status') {
+                    Lampa.Noty.show('Проверяю подключение к Trakt…');
+                    getTraktWatchedIndex().then(function () {
+                        Lampa.Noty.show('Trakt: подключение успешно');
+                    }).catch(function () {
+                        Lampa.Noty.show('Trakt: ошибка подключения');
+                    });
+                } else if (item.action === 'badges') {
+                    Lampa.Noty.show(item.subtitle);
+                } else if (item.action === 'return_to_hub') {
+                    returnToPlexLibraryAfterDelete();
+                }
+            },
+            onBack: function () { Lampa.Controller.toggle('settings_component'); }
+        });
+    }
+
     function initSettings() {
         Lampa.SettingsApi.addComponent({ component: 'plex', name: 'Plex', icon: ICON_SETTINGS });
 
@@ -1254,84 +1322,23 @@
 
         Lampa.SettingsApi.addParam({
             component: 'plex',
-            param: { name: 'plex_trakt_status_debug', type: 'button' },
-            field: { name: 'Проверить подключение к Trakt' },
-            onRender: function (item) {
-                if (!traktStatusEnabled()) { item.hide(); return; }
-                item.show();
-                item.find('.plex-field-status').remove();
-                var status;
-                if (!traktConfigured()) {
-                    status = 'не найдены client_id/токен Trakt в хранилище Lampa — войдите в LampaTrakt';
-                } else if (_traktLastFetch.ok === true) {
-                    status = 'ок, ' + new Date(_traktLastFetch.at).toLocaleString() + ' — фильмов: ' + _traktLastFetch.movies + ', сериалов: ' + _traktLastFetch.shows;
-                } else if (_traktLastFetch.ok === false) {
-                    status = 'ошибка (' + new Date(_traktLastFetch.at).toLocaleString() + '): ' + _traktLastFetch.error;
-                } else {
-                    status = 'ещё не проверялось — нажмите, чтобы проверить';
-                }
-                item.append('<div class="settings-param__value plex-field-status" style="font-size:.85em;opacity:.65">' + escapeHtml(status) + '</div>');
-            },
-            onChange: function () {
-                Lampa.Noty.show('Проверяю подключение к Trakt…');
-                getTraktWatchedIndex().then(function () {
-                    Lampa.Noty.show('Trakt: подключение успешно');
-                }).catch(function () {
-                    Lampa.Noty.show('Trakt: ошибка подключения — см. статус ниже');
-                }).then(function () { Lampa.Settings.update(); });
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: 'plex',
             param: { name: 'plex_trakt_sync_to_plex', type: 'button' },
             field: { name: 'Синхронизировать статусы в Plex', description: 'Отметить в Plex как просмотренные фильмы и полностью просмотренные сериалы из истории Trakt. Действие ручное и необратимое без отдельной отметки «не просмотрено» в самом Plex.' },
             onRender: function (item) { if (traktStatusEnabled()) item.show(); else item.hide(); },
             onChange: function () { confirmTraktSyncToPlex(); }
         });
 
-        Lampa.SettingsApi.addParam({
-            component: 'plex',
-            param: { name: 'plex_badges_debug', type: 'button' },
-            field: { name: 'Проверить бейджи LampaTrakt на медиатеке', description: 'Диагностика последней попытки применить window.TraktTV.applyBadges к карточке в разделе «Plex». Не гейтится тумблером «Статусы Trakt.TV» — бейджи работают независимо от него.' },
-            onRender: function (item) {
-                if (!traktAvailable()) { item.hide(); return; }
-                item.show();
-                item.find('.plex-field-status').remove();
-                var status;
-                if (!_plexBadgesLastAttempt) {
-                    status = 'ещё не было карточек — откройте раздел «Plex» в меню, затем вернитесь сюда';
-                } else {
-                    var a = _plexBadgesLastAttempt;
-                    var when = new Date(a.at).toLocaleString();
-                    if (!a.available) {
-                        status = when + ' — window.TraktTV.applyBadges не найден (LampaTrakt не установлен/не проинициализировался)';
-                    } else if (a.error) {
-                        status = when + ' — ошибка внутри applyBadges: ' + a.error;
-                    } else {
-                        status = when + ' — вызван без ошибок (id: ' + (a.id || '—') + ', тип: ' + (a.method || '—') + ')';
-                    }
-                }
-                item.append('<div class="settings-param__value plex-field-status" style="font-size:.85em;opacity:.65">' + escapeHtml(status) + '</div>');
-            },
-            onChange: function () { Lampa.Settings.update(); }
-        });
-
         sectionHeader('plex_other_section', 'Прочее');
 
-        // Диагностика без риска для медиатеки: четыре попытки починить переход
-        // в раздел «Плекс» после удаления (Activity.replace → Activity.push →
-        // try/catch-диагностика → фикс dataType:'json' в Api.deleteMetadata)
-        // не дали видимого результата, а проверка требует каждый раз реально
-        // удалять что-то из Plex — тестовый материал заканчивается. Эта кнопка
-        // вызывает ТОЧНО ТУ ЖЕ функцию перехода (returnToPlexLibraryAfterDelete
-        // ничего не знает про удаление — только запрашивает медиатеки и делает
-        // Lampa.Activity.push), без единого удаления, сколько угодно раз.
+        // Единое меню отладки — по образцу LampaTrakt (там тоже один пункт
+        // «Отладка», открывающий Select со списком диагностик), вместо
+        // нескольких отдельных строк настроек со своим onRender/статусом
+        // каждая. См. plexDebugMenuItems/openPlexDebugMenu выше.
         Lampa.SettingsApi.addParam({
             component: 'plex',
-            param: { name: 'plex_test_return_to_hub', type: 'button' },
-            field: { name: 'Тест: перейти в раздел «Плекс»', description: 'Вызывает точно тот же переход, что должен происходить после удаления из Plex — без самого удаления. Помогает проверить именно эту часть отдельно.' },
-            onChange: function () { returnToPlexLibraryAfterDelete(); }
+            param: { name: 'plex_debug_menu', type: 'button' },
+            field: { name: 'Отладка', description: 'Диагностика работы плагина' },
+            onChange: function () { openPlexDebugMenu(); }
         });
 
         Lampa.SettingsApi.addParam({

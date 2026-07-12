@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.13';
+    var PLUGIN_VERSION = '1.7.14';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -2517,20 +2517,44 @@
     // кнопку «Смотреть из Plex»), а не на экран до неё; менее приятно, но
     // предсказуемо работает. Ошибку этого шага теперь не проглатываем молча —
     // отдельный Noty, чтобы не повторить тихий сбой ещё раз.
+    // v1.7.13 (переход на Lampa.Activity.push вместо .replace) тоже не
+    // сработал — пользователь подтвердил, что удаление и индикатор снова
+    // отработали, перехода снова не случилось, и НИКАКОГО нового
+    // уведомления (в т.ч. добавленного в v1.7.13 сообщения об ошибке)
+    // тоже не появилось. Раз даже .catch() ничего не показал — сбой
+    // происходит либо ДО него (внутри .then(), где раньше было тихое
+    // `if (!chosen.length) return`), либо ЭТА функция вообще не
+    // вызывается. Оборачиваем каждый шаг в try/catch с ОТДЕЛЬНЫМ,
+    // разным текстом Noty на каждую ветку — раз сами не можем
+    // протестировать на устройстве, а два предположения подряд не
+    // подтвердились, следующий отчёт пользователя должен явно указать,
+    // где именно ломается, вместо очередной слепой догадки.
     function returnToPlexLibraryAfterDelete() {
-        Api.sections().then(function (all) {
-            var picked = getSections();
-            var chosen = picked.length ? all.filter(function (s) { return picked.indexOf(s.key) >= 0; }) : all;
-            if (!chosen.length) return;
+        try {
+            Api.sections().then(function (all) {
+                try {
+                    var picked = getSections();
+                    var chosen = picked.length ? all.filter(function (s) { return picked.indexOf(s.key) >= 0; }) : all;
 
-            Lampa.Activity.push({
-                component: 'plex_hub',
-                title: 'Plex',
-                plex_sections_available: chosen
+                    if (!chosen.length) {
+                        Lampa.Noty.show('Удалено из Plex, но не выбраны медиатеки для раздела «Плекс» — переход пропущен');
+                        return;
+                    }
+
+                    Lampa.Activity.push({
+                        component: 'plex_hub',
+                        title: 'Plex',
+                        plex_sections_available: chosen
+                    });
+                } catch (err) {
+                    Lampa.Noty.show('Удалено из Plex, ошибка при открытии раздела «Плекс»: ' + (err && err.message ? err.message : err));
+                }
+            }).catch(function (err) {
+                Lampa.Noty.show('Удалено из Plex, не удалось получить список медиатек: ' + (err && err.message ? err.message : err));
             });
-        }).catch(function () {
-            Lampa.Noty.show('Удалено из Plex, но не удалось открыть раздел «Плекс»');
-        });
+        } catch (err) {
+            Lampa.Noty.show('Удалено из Plex, ошибка запуска перехода: ' + (err && err.message ? err.message : err));
+        }
     }
 
     // Полное удаление с сервера Plex (сам сервер удаляет и файл(ы) на диске —

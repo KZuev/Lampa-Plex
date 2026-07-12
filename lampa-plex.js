@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.17';
+    var PLUGIN_VERSION = '1.7.18';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1622,16 +1622,28 @@
         Api.children(showMeta.ratingKey).then(function (children) {
             if (loader.cancelled) return;
             hidePlexLoader();
-            var seasons = children.filter(function (s) { return s.type === 'season'; });
-            if (!seasons.length) { Lampa.Noty.show('Сезоны не найдены'); return; }
-            afterPreviousSelectClosed(startedAt, function () {
-                Lampa.Select.show({
-                    title: showMeta.title,
-                    items: seasons.map(function (s) { return { title: s.title || ('Сезон ' + s.index), s: s }; }),
-                    onSelect: function (a) { openEpisodePicker(showMeta, a.s); },
-                    onBack: function () { Lampa.Controller.toggle('content'); }
+            // hidePlexLoader() выше ставит loader.cancelled=true (это его
+            // общий побочный эффект — «этот индикатор больше не активен»,
+            // используемый ДРУГИМИ вызовами для обнаружения устаревшего
+            // состояния). Из-за этого follow-up ошибка НИЖЕ в этом же коллбэке
+            // молча проглатывалась бы внешним .catch() — его собственная
+            // проверка `if (loader.cancelled) return` теперь всегда истинна.
+            // Оборачиваем в свой try/catch, чтобы такая ошибка не пропадала
+            // бесследно (см. запись в истории версий про этот баг).
+            try {
+                var seasons = children.filter(function (s) { return s.type === 'season'; });
+                if (!seasons.length) { Lampa.Noty.show('Сезоны не найдены'); return; }
+                afterPreviousSelectClosed(startedAt, function () {
+                    Lampa.Select.show({
+                        title: showMeta.title,
+                        items: seasons.map(function (s) { return { title: s.title || ('Сезон ' + s.index), s: s }; }),
+                        onSelect: function (a) { openEpisodePicker(showMeta, a.s); },
+                        onBack: function () { Lampa.Controller.toggle('content'); }
+                    });
                 });
-            });
+            } catch (err) {
+                Lampa.Noty.show('Ошибка при показе сезонов: ' + (err && err.message ? err.message : err));
+            }
         }).catch(function () {
             if (loader.cancelled) return;
             cancelPlexLoader();
@@ -1657,28 +1669,35 @@
                 if (loader.cancelled) return;
                 hidePlexLoader();
 
-                function episodeSubtitle(e) {
-                    if (traktEpSet) {
-                        return traktEpSet[season.index + ':' + e.index] ? 'Просмотрено' : '';
-                    }
-                    var watched = e.viewCount > 0;
-                    var progress = (e.viewOffset && e.duration) ? Math.round(e.viewOffset / e.duration * 100) : 0;
-                    return watched ? 'Просмотрено' : (progress ? progress + '%' : '');
-                }
+                // См. аналогичный комментарий в openSeasonPicker — hidePlexLoader()
+                // выше уже выставил loader.cancelled=true, поэтому ошибку из кода
+                // ниже нужно ловить самим, иначе внешний .catch() её молча съест.
+                try {
+                    var episodeSubtitle = function (e) {
+                        if (traktEpSet) {
+                            return traktEpSet[season.index + ':' + e.index] ? 'Просмотрено' : '';
+                        }
+                        var watched = e.viewCount > 0;
+                        var progress = (e.viewOffset && e.duration) ? Math.round(e.viewOffset / e.duration * 100) : 0;
+                        return watched ? 'Просмотрено' : (progress ? progress + '%' : '');
+                    };
 
-                afterPreviousSelectClosed(startedAt, function () {
-                    Lampa.Select.show({
-                        title: season.title || ('Сезон ' + season.index),
-                        items: episodes.map(function (e) {
-                            return { title: e.index + '. ' + (e.title || ''), subtitle: episodeSubtitle(e), e: e };
-                        }),
-                        onSelect: function (a) {
-                            var idx = episodes.indexOf(a.e);
-                            playEpisode(a.e, showMeta, episodes.slice(idx + 1));
-                        },
-                        onBack: function () { openSeasonPicker(showMeta); }
+                    afterPreviousSelectClosed(startedAt, function () {
+                        Lampa.Select.show({
+                            title: season.title || ('Сезон ' + season.index),
+                            items: episodes.map(function (e) {
+                                return { title: e.index + '. ' + (e.title || ''), subtitle: episodeSubtitle(e), e: e };
+                            }),
+                            onSelect: function (a) {
+                                var idx = episodes.indexOf(a.e);
+                                playEpisode(a.e, showMeta, episodes.slice(idx + 1));
+                            },
+                            onBack: function () { openSeasonPicker(showMeta); }
+                        });
                     });
-                });
+                } catch (err) {
+                    Lampa.Noty.show('Ошибка при показе серий: ' + (err && err.message ? err.message : err));
+                }
             });
         }).catch(function () {
             if (loader.cancelled) return;
@@ -2619,19 +2638,35 @@
             if (loader.cancelled) return;
             hidePlexLoader();
 
-            Lampa.Noty.show('Удалено из Plex' + (info.title ? ': ' + info.title : ''));
+            // НАЙДЕННЫЙ БАГ (объясняет всю серию «возврат в Плекс не срабатывает,
+            // и вообще без ошибок»): hidePlexLoader() выше сама выставляет
+            // loader.cancelled=true — это её общий побочный эффект для ДРУГИХ
+            // случаев («индикатор больше не активен»), но здесь он означает, что
+            // проверка `if (loader.cancelled) return` во внешнем .catch() ниже
+            // становится ВСЕГДА истинной. Если что-то в коде ниже (например,
+            // внутри returnToPlexLibraryAfterDelete — хотя там уже есть свой
+            // try/catch — или в одной из строк до неё) всё же бросит исключение,
+            // весь .catch() тихо завершался бы без единого уведомления — именно
+            // то, что несколько раз подряд наблюдал пользователь. Оборачиваем
+            // всё, что идёт после hidePlexLoader(), в свой try/catch, чтобы
+            // подобная ошибка больше не терялась бесследно.
+            try {
+                Lampa.Noty.show('Удалено из Plex' + (info.title ? ': ' + info.title : ''));
 
-            delete _plexTmdbIndex[info.method + ':' + info.tmdbId];
-            setStoredTmdbIndex(_plexTmdbIndex);
+                delete _plexTmdbIndex[info.method + ':' + info.tmdbId];
+                setStoredTmdbIndex(_plexTmdbIndex);
 
-            if (_currentPlexCardMatch === info) _currentPlexCardMatch = null;
+                if (_currentPlexCardMatch === info) _currentPlexCardMatch = null;
 
-            var active = Lampa.Activity.active();
-            var root = active && active.activity && typeof active.activity.render === 'function' ? active.activity.render() : null;
-            if (root) root.find('.plex-watch-btn').remove();
-            restorePlexPriorityIfNeeded();
+                var active = Lampa.Activity.active();
+                var root = active && active.activity && typeof active.activity.render === 'function' ? active.activity.render() : null;
+                if (root) root.find('.plex-watch-btn').remove();
+                restorePlexPriorityIfNeeded();
 
-            returnToPlexLibraryAfterDelete();
+                returnToPlexLibraryAfterDelete();
+            } catch (err) {
+                Lampa.Noty.show('Удалено из Plex, но произошла ошибка после удаления: ' + (err && err.message ? err.message : err));
+            }
         }).catch(function () {
             if (loader.cancelled) return;
             cancelPlexLoader();

@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.11';
+    var PLUGIN_VERSION = '1.7.12';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -2497,13 +2497,41 @@
         });
     }
 
+    // После удаления возвращаемся в раздел «Плекс» (тот же plex_hub, что и
+    // левое меню, см. openLibrary) — свежим экземпляром компонента, а не
+    // возвратом по стеку: Lampa.Activity.replace(..., true) уничтожает
+    // текущую (уже неактуальную) карточку и ПОДМЕНЯЕТ её в стеке новой —
+    // «назад» из библиотеки ведёт туда, что было до карточки, а не обратно
+    // в неё. Свежий экземпляр сам заново запросит список у Plex — удалённый
+    // тайтл в нём уже не придёт, отдельно «обновлять» нечего.
+    function returnToPlexLibraryAfterDelete() {
+        Api.sections().then(function (all) {
+            var picked = getSections();
+            var chosen = picked.length ? all.filter(function (s) { return picked.indexOf(s.key) >= 0; }) : all;
+            if (!chosen.length) return;
+
+            Lampa.Activity.replace({
+                component: 'plex_hub',
+                title: 'Plex',
+                plex_sections_available: chosen
+            }, true);
+        }).catch(function () {});
+    }
+
     // Полное удаление с сервера Plex (сам сервер удаляет и файл(ы) на диске —
     // как кнопка «Delete» в официальном клиенте; вернёт ошибку, если на
     // сервере выключено «Allow Media Deletion»). После успеха вычищаем
-    // элемент из локального индекса и снимаем нашу кнопку/закрепление с
-    // текущей карточки — она больше не доступна в Plex.
+    // элемент из локального индекса, снимаем нашу кнопку/закрепление с
+    // текущей карточки (она больше не доступна в Plex) и уходим в раздел
+    // «Плекс» — см. returnToPlexLibraryAfterDelete. Пока запрос идёт —
+    // тот же индикатор загрузки, что и при открытии сезонов/серий
+    // (showPlexLoader/hidePlexLoader/cancelPlexLoader).
     function deleteFromPlex(info) {
+        var loader = showPlexLoader();
         Api.deleteMetadata(info.ratingKey).then(function () {
+            if (loader.cancelled) return;
+            hidePlexLoader();
+
             Lampa.Noty.show('Удалено из Plex' + (info.title ? ': ' + info.title : ''));
 
             delete _plexTmdbIndex[info.method + ':' + info.tmdbId];
@@ -2515,7 +2543,11 @@
             var root = active && active.activity && typeof active.activity.render === 'function' ? active.activity.render() : null;
             if (root) root.find('.plex-watch-btn').remove();
             restorePlexPriorityIfNeeded();
+
+            returnToPlexLibraryAfterDelete();
         }).catch(function () {
+            if (loader.cancelled) return;
+            cancelPlexLoader();
             Lampa.Noty.show('Не удалось удалить из Plex — проверьте, что на сервере включено «Allow Media Deletion»');
         });
     }

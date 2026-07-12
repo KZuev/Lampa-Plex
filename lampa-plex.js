@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.14';
+    var PLUGIN_VERSION = '1.7.15';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -266,8 +266,34 @@
         // в официальном клиенте). Сервер вернёт ошибку, если в его
         // настройках выключено «Allow Media Deletion» — тогда просто
         // сообщаем о неудаче, ничего не делаем локально.
+        // Нашли настоящую причину серии неудачных попыток чинить «возврат в
+        // раздел Плекс не срабатывает»: он и не мог сработать — сам этот
+        // запрос ВСЕГДА завершался ошибкой, хотя удаление реально проходило
+        // на сервере (пользователь трижды подряд подтвердил: фильм удалялся,
+        // но плагин показывал именно «Не удалось удалить из Plex»). Plex на
+        // успешный DELETE обычно отвечает пустым телом (без JSON) — а
+        // обычный plexRequest() требует `dataType:'json'`, из-за чего jQuery
+        // шлёт это в .fail() как parsererror, даже если HTTP-статус был
+        // 200/204 (реальный успех). Все три предыдущих «фикса» возврата в
+        // библиотеку (Activity.replace → Activity.push → try/catch-диагностика)
+        // чинили код, который из-за этого попросту никогда не выполнялся.
+        // Здесь — свой запрос без dataType:'json' и с явной проверкой
+        // HTTP-статуса: 2xx считаем успехом независимо от того, распарсилось
+        // ли (и было ли вообще) тело ответа.
         deleteMetadata: function (ratingKey) {
-            return plexRequest('/library/metadata/' + ratingKey, {}, 'DELETE');
+            return new Promise(function (resolve, reject) {
+                if (!getServerUrl() || !getToken()) { reject(new Error('Plex is not configured')); return; }
+                $.ajax({
+                    url: plexUrl('/library/metadata/' + ratingKey, {}),
+                    method: 'DELETE',
+                    timeout: 15000
+                }).done(function () {
+                    resolve();
+                }).fail(function (jqXHR) {
+                    if (jqXHR.status >= 200 && jqXHR.status < 300) resolve();
+                    else reject(jqXHR);
+                });
+            });
         }
     };
 

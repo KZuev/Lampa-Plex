@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.15';
+    var PLUGIN_VERSION = '1.7.16';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1318,6 +1318,21 @@
         });
 
         sectionHeader('plex_other_section', 'Прочее');
+
+        // Диагностика без риска для медиатеки: четыре попытки починить переход
+        // в раздел «Плекс» после удаления (Activity.replace → Activity.push →
+        // try/catch-диагностика → фикс dataType:'json' в Api.deleteMetadata)
+        // не дали видимого результата, а проверка требует каждый раз реально
+        // удалять что-то из Plex — тестовый материал заканчивается. Эта кнопка
+        // вызывает ТОЧНО ТУ ЖЕ функцию перехода (returnToPlexLibraryAfterDelete
+        // ничего не знает про удаление — только запрашивает медиатеки и делает
+        // Lampa.Activity.push), без единого удаления, сколько угодно раз.
+        Lampa.SettingsApi.addParam({
+            component: 'plex',
+            param: { name: 'plex_test_return_to_hub', type: 'button' },
+            field: { name: 'Тест: перейти в раздел «Плекс»', description: 'Вызывает точно тот же переход, что должен происходить после удаления из Plex — без самого удаления. Помогает проверить именно эту часть отдельно.' },
+            onChange: function () { returnToPlexLibraryAfterDelete(); }
+        });
 
         Lampa.SettingsApi.addParam({
             component: 'plex',

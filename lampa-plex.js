@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.18';
+    var PLUGIN_VERSION = '1.7.19';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -56,6 +56,18 @@
             for (var k in src) if (src.hasOwnProperty(k)) target[k] = src[k];
         }
         return target;
+    }
+
+    // Инструменты организации медиатеки (Radarr/Sonarr, Kodi-стиль именования
+    // файлов) иногда пишут в имя файла служебные метки для точного
+    // сопоставления с базами данных — например «Ужастики {tmdb-257445}».
+    // Если у конкретного тайтла в Plex название матчилось не идеально чисто,
+    // такая метка иногда остаётся прямо в поле title, которое Plex отдаёт по
+    // API, — и утекает дальше, например, во внешний плеер (Infuse и т.п.),
+    // который показывает её пользователю как часть названия. Убираем такие
+    // метки перед показом/передачей названия куда-либо за пределы Plex.
+    function cleanPlexTitle(title) {
+        return String(title || '').replace(/\s*\{[a-zA-Z]+-[^{}]+\}/g, '').trim();
     }
 
     function escapeHtml(s) {
@@ -1395,8 +1407,8 @@
         var method = item.type === 'show' ? 'tv' : 'movie';
 
         var base = {
-            title: item.title,
-            original_title: item.title,
+            title: cleanPlexTitle(item.title),
+            original_title: cleanPlexTitle(item.title),
             release_date: item.year ? String(item.year) : '',
             vote_average: Number(item.rating || item.audienceRating || 0),
             poster: poster,
@@ -1414,7 +1426,7 @@
         // сопоставленных с TMDB, ни тем более на собственных карточках без
         // сопоставления. Это никак не связано с source:'tmdb'/component:'full'
         // ниже — модуль Icons смотрит только на сам объект данных карточки.
-        if (method === 'tv') base.original_name = item.title;
+        if (method === 'tv') base.original_name = cleanPlexTitle(item.title);
 
         if (tmdbId) {
             extend(base, {
@@ -1748,7 +1760,7 @@
         Lampa.Timeline.update({ hash: h, time: viewOffset, duration: duration, percent: percent });
         var subs = buildSubtitles(mp);
         var item = {
-            title: m.grandparentTitle ? (m.grandparentTitle + ' - ' + m.title) : m.title,
+            title: cleanPlexTitle(m.grandparentTitle ? (m.grandparentTitle + ' - ' + m.title) : m.title),
             url: plexUrl(mp.key),
             timeline: Lampa.Timeline.view(h)
         };
@@ -1808,7 +1820,7 @@
         var trakt = showTmdb ? { type: 'episode', tmdb: showTmdb, season: episodeStub.parentIndex, number: episodeStub.index } : null;
         Api.metadata(episodeStub.ratingKey).then(function (meta) {
             var poster = meta.thumb ? plexUrl(meta.thumb) : (showMeta.thumb ? plexUrl(showMeta.thumb) : '');
-            var cardData = { title: showMeta.title + ' - ' + meta.title, img: poster };
+            var cardData = { title: cleanPlexTitle(showMeta.title) + ' - ' + cleanPlexTitle(meta.title), img: poster };
 
             var upcoming = (nextEpisodeStubs || []).slice(0, 5);
             if (upcoming.length) {

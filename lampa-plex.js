@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.19';
+    var PLUGIN_VERSION = '1.8.0';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -259,6 +259,17 @@
 
         children: function (ratingKey) {
             return plexRequest('/library/metadata/' + ratingKey + '/children').then(function (mc) {
+                return mc.Metadata || [];
+            });
+        },
+
+        // «Продолжить просмотр» — общий для всего сервера список (не по
+        // медиатекам): смесь частично просмотренных фильмов (сам фильм) и
+        // сериалов «в процессе» (следующая непросмотренная серия — Plex сам
+        // решает, какая именно, элемент при этом типа 'episode' с полями
+        // grandparentTitle/grandparentThumb/parentIndex/index серии).
+        onDeck: function () {
+            return plexRequest('/library/onDeck', { 'X-Plex-Container-Start': 0, 'X-Plex-Container-Size': 20, includeGuids: 1 }).then(function (mc) {
                 return mc.Metadata || [];
             });
         },
@@ -1442,6 +1453,120 @@
         return base;
     }
 
+    // Карточка для строки «Продолжить просмотр» (см. Api.onDeck). Фильм —
+    // обычная карточка toCard(), клик работает как везде (открывает родную
+    // карточку/нашу модалку, воспроизведение резюмируется автоматически
+    // через уже существующий Lampa.Timeline). Серия — элемент on-deck САМ
+    // уже указывает на конкретную непросмотренную серию, поэтому карточка
+    // подписывается именем сериала + «S{сезон} • E{серия}» вместо года, а
+    // клик обязан сразу продолжить именно эту серию, а не открывать выбор
+    // сезона — для этого помечаем карточку `plex_ondeck_episode` (сырой
+    // элемент Plex), который строка «Продолжить просмотр» проверяет в своём
+    // onEnter вместо обычного onCardEnter (см. buildContinueWatchingRow).
+    function onDeckToCard(item) {
+        var card = item.type === 'episode' ? {
+            title: cleanPlexTitle(item.grandparentTitle || item.title),
+            original_title: cleanPlexTitle(item.grandparentTitle || item.title),
+            original_name: cleanPlexTitle(item.grandparentTitle || item.title),
+            release_date: 'S' + (item.parentIndex != null ? item.parentIndex : '?') + ' • E' + (item.index != null ? item.index : '?'),
+            vote_average: 0,
+            poster: item.grandparentThumb ? plexUrl(item.grandparentThumb) : (item.thumb ? plexUrl(item.thumb) : ''),
+            plex_ondeck_episode: item
+        } : toCard(item);
+        if (item.type === 'episode') { card.image = card.poster; card.img = card.poster; }
+        card._plex_ondeck_raw = item;
+        return card;
+    }
+
+    // Резюмирует конкретную серию из «Продолжить просмотр» напрямую, без
+    // выбора сезона/серии — showMeta сериала нужен только для findTmdbId
+    // (статус в Trakt) и заголовка/постера, сама серия уже полностью
+    // известна из on-deck элемента (ratingKey/viewOffset/duration и т.д.),
+    // повторный запрос за ней не нужен.
+    function playOnDeckEpisode(item) {
+        var loader = showPlexLoader();
+        Api.metadata(item.grandparentRatingKey).then(function (showMeta) {
+            if (loader.cancelled) return;
+            hidePlexLoader();
+            try {
+                playEpisode(item, showMeta, []);
+            } catch (err) {
+                Lampa.Noty.show('Ошибка воспроизведения: ' + (err && err.message ? err.message : err));
+            }
+        }).catch(function () {
+            if (loader.cancelled) return;
+            cancelPlexLoader();
+            Lampa.Noty.show('Не удалось получить данные сериала');
+        });
+    }
+
+    // Полоска прогресса на постере — та же родная разметка Lampa
+    // (.card-watched/.card-watched__body/.time-line), которой пользуется
+    // сама Lampa для «Продолжить просмотр» в других источниках; строим её
+    // сами, т.к. карточки Plex собираются из данных Plex, а не из готовых
+    // объектов с этим полем.
+    function applyOnDeckWatchedBar(card, element) {
+        var raw = element && element._plex_ondeck_raw;
+        var duration = raw && raw.duration;
+        var viewOffset = (raw && raw.viewOffset) || 0;
+        if (!duration) return;
+        var percent = Math.max(0, Math.min(100, Math.round(viewOffset / duration * 100)));
+        var cardNode = card && typeof card.render === 'function' ? card.render(true) : null;
+        var cardView = cardNode && cardNode.querySelector ? cardNode.querySelector('.card__view') : null;
+        if (!cardView) return;
+        var wrap = cardView.querySelector('.card-watched.plex-ondeck-watched');
+        if (!wrap) {
+            wrap = document.createElement('div');
+            wrap.className = 'card-watched plex-ondeck-watched';
+            wrap.innerHTML = '<div class="card-watched__inner"><div class="card-watched__body"><div class="card-watched__item"><div class="time-line"><div></div></div></div></div></div>';
+            cardView.insertBefore(wrap, cardView.firstChild);
+        }
+        var bar = wrap.querySelector('.time-line > div');
+        if (bar) bar.style.width = percent + '%';
+    }
+
+    // Строка «Продолжить просмотр» — horizontal-виджет через штатный
+    // `Lampa.Maker.make('Line', ...)` (используется и родными строками
+    // Lampa, и Category-сеткой наших же экранов — тот же класс Card внутри,
+    // просто другой контейнер/скролл, см. src/interaction/items/line).
+    // Строим отдельным виджетом и вставляем его DOM в уже существующий
+    // `container` (controls хаба plex_hub), НЕ вызывая line.toggle() — тем
+    // самым намеренно НЕ регистрируем её собственный Controller, чтобы
+    // карточки строки участвовали в ТОЙ ЖЕ навигации, что и кнопки фильтров
+    // (Controller.collectionSet видит все .selector внутри controls разом).
+    function buildContinueWatchingRow(container, beforeNode) {
+        return Api.onDeck().then(function (items) {
+            if (!items || !items.length) return null;
+
+            var cards = items.map(onDeckToCard);
+            var line = Lampa.Maker.make('Line', { title: 'Продолжить просмотр', results: cards, params: {} });
+
+            line.use({
+                onInstance: function (card, element) {
+                    card.use({
+                        onEnter: function () {
+                            if (element.plex_ondeck_episode) playOnDeckEpisode(element.plex_ondeck_episode);
+                            else onCardEnter(element);
+                        },
+                        onFocus: function () { Lampa.Background.change(Lampa.Utils.cardImgBackground(element)); }
+                    });
+                    // Тот же приём отложенного вызова, что и с бейджами LampaTrakt в
+                    // сетке (см. makePlexLibraryComponent): DOM карточки готов только
+                    // ПОСЛЕ item.create(), которая идёт синхронно сразу за 'instance'.
+                    setTimeout(function () { applyOnDeckWatchedBar(card, element); }, 0);
+                }
+            });
+
+            line.create();
+
+            var wrap = $('<div class="plex-hub__ondeck"></div>').append(line.render());
+            if (beforeNode && beforeNode.length) beforeNode.before(wrap);
+            else container.append(wrap);
+
+            return line;
+        }).catch(function () { return null; });
+    }
+
     function onCardEnter(element) {
         if (element.component === 'full') {
             Lampa.Activity.push(element);
@@ -2227,6 +2352,7 @@
         var FILTER_CTRL = 'plex_hub_controls';
         var activity, html, controls, filtersRow, body;
         var currentView = null;
+        var ondeckLine = null;
         var lastFilterFocus = null;
         var sections = object.plex_sections_available || [];
         var activeSectionKey = null; // null = «Все»
@@ -2465,6 +2591,14 @@
                 controls.append(filtersRow);
                 html.append(controls, body);
 
+                // Строка «Продолжить просмотр» вставляется ВЫШЕ строки фильтров
+                // внутри того же controls — асинхронно (ждём Api.onDeck()), поэтому
+                // если пользователь уже успел зайти в FILTER_CTRL до её появления,
+                // карточки строки станут доступны по стрелкам со следующего входа в
+                // controls (Controller.collectionSet(controls) пересобирается
+                // заново на каждый toggle) — не идеально, но не критично.
+                buildContinueWatchingRow(controls, filtersRow).then(function (line) { ondeckLine = line; });
+
                 Lampa.Controller.add(FILTER_CTRL, {
                     toggle: function () {
                         Lampa.Controller.collectionSet(controls);
@@ -2497,8 +2631,10 @@
             stop: function () {},
             destroy: function () {
                 if (currentView && currentView.destroy) currentView.destroy();
+                if (ondeckLine && ondeckLine.destroy) ondeckLine.destroy();
                 if (html) html.remove();
                 currentView = null;
+                ondeckLine = null;
             }
         };
     });
@@ -2775,6 +2911,11 @@
             // #e5a00d) вместо фиолетового Trakt.
             '.plex-hub{display:flex;flex-direction:column;height:100%}' +
             '.plex-hub__controls{padding:.8em 1.5em .2em}' +
+            // Строка «Продолжить просмотр» — родная разметка .items-line
+            // (Lampa.Maker.make('Line', ...)), только выравниваем горизонтальные
+            // отступы под остальной хаб (родные .items-line__head/__body уже
+            // сами по себе имеют собственный padding — здесь не трогаем).
+            '.plex-hub__ondeck{padding:0 .5em}' +
             // Ключевые нейтрализации родных стилей Lampa (как у LampaTrakt):
             // margin:0 гасит .simple-button{margin-right:1em} (иначе 5 кнопок
             // теряют ~четверть строки на пустые поля), высота auto гасит

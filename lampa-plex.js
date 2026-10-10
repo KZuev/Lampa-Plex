@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.20';
+    var PLUGIN_VERSION = '1.7.21';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1768,9 +1768,73 @@
         return item;
     }
 
+    // Оверлей запуска воспроизведения — по образцу «Авто-торрента» LampaTrakt
+    // (`.trakt-at-overlay`): затемнение на весь экран, кольцо, статус, кнопка
+    // отмены; «Назад» на пульте отменяет через невидимый временный контроллер.
+    // Показывается с той же задержкой PLEX_LOADER_DELAY, что и индикатор
+    // сезонов/серий, — на быстром ответе почти чёрный слой не мигает.
+    // В отличие от hidePlexLoader, скрытие НЕ трогает state.cancelled: отменой
+    // считается только отказ пользователя или замена новым запуском.
+    var PLAY_LOADER_CTRL = 'plex_play_loader';
+    var _playLoader = null;
+
+    function showPlayLoader() {
+        if (_playLoader) { _playLoader.cancelled = true; hidePlayLoader(true); }
+
+        var state = { cancelled: false, el: null, timer: null };
+        _playLoader = state;
+
+        state.timer = setTimeout(function () {
+            state.timer = null;
+            if (_playLoader !== state) return;
+            var el = document.createElement('div');
+            el.className = 'plex-play-overlay';
+            el.innerHTML = '<div class="plex-play-overlay__spinner"></div>' +
+                '<div class="plex-play-overlay__status">Запускаем воспроизведение…</div>' +
+                '<div class="plex-play-overlay__cancel">Отменить</div>' +
+                '<div class="plex-play-overlay__hint">Нажмите «Назад» на пульте или кнопку выше</div>';
+            el.querySelector('.plex-play-overlay__cancel').addEventListener('click', function (ev) {
+                ev.stopPropagation();
+                cancelPlayLoader();
+            });
+            document.body.appendChild(el);
+            state.el = el;
+        }, PLEX_LOADER_DELAY);
+
+        Lampa.Controller.add(PLAY_LOADER_CTRL, {
+            invisible: true,
+            toggle: function () {},
+            back: function () { cancelPlayLoader(); }
+        });
+        Lampa.Controller.toggle(PLAY_LOADER_CTRL);
+
+        return state;
+    }
+
+    function releasePlayLoaderController() {
+        try { if (Lampa.Controller.enabled().name === PLAY_LOADER_CTRL) Lampa.Controller.toggle('content'); } catch (e) {}
+    }
+
+    function hidePlayLoader(keepController) {
+        var state = _playLoader;
+        _playLoader = null;
+        if (state) {
+            if (state.timer) clearTimeout(state.timer);
+            if (state.el && state.el.parentNode) state.el.parentNode.removeChild(state.el);
+        }
+        if (!keepController) releasePlayLoaderController();
+    }
+
+    function cancelPlayLoader() {
+        if (!_playLoader) return;
+        _playLoader.cancelled = true;
+        hidePlayLoader();
+        Lampa.Noty.show('Запуск воспроизведения отменён');
+    }
+
     function playMeta(meta, cardData, playlistMetas, resume, trakt) {
         var current = buildPlexPlaylistItem(meta, resume);
-        if (!current) { Lampa.Noty.show('Не найден файл для воспроизведения (нужен Direct Play — транскодирование не поддерживается)'); return; }
+        if (!current) { hidePlayLoader(); Lampa.Noty.show('Не найден файл для воспроизведения (нужен Direct Play — транскодирование не поддерживается)'); return; }
 
         // Плейлист начинается с ТЕКУЩЕГО элемента (его url === playData.url), далее
         // следующие серии — каждая со своим timeline, чтобы при переходе resume тоже работал.
@@ -1803,12 +1867,25 @@
 
         _activePlexPlayback = { items: tracked, duration: (current.timeline && current.timeline.duration) || 0, external: false };
 
+        // Оверлей убираем ДО запуска (иначе с z-index 99999 он закрыл бы
+        // встроенный плеер), а контроллер отпускаем ПОСЛЕ: встроенный плеер
+        // забирает фокус сам, а при внешнем плеере наш слой иначе так и
+        // остался бы активным и пульт после возврата не работал бы.
+        hidePlayLoader(true);
         Lampa.Player.play(playData);
+        releasePlayLoaderController();
     }
 
     function playRatingKey(ratingKey, cardData, trakt) {
-        Api.metadata(ratingKey).then(function (meta) { playMeta(meta, cardData, null, null, trakt); })
-            .catch(function () { Lampa.Noty.show('Не удалось получить данные для воспроизведения'); });
+        var loader = showPlayLoader();
+        Api.metadata(ratingKey).then(function (meta) {
+            if (loader.cancelled) return;
+            playMeta(meta, cardData, null, null, trakt);
+        }).catch(function () {
+            if (loader.cancelled) return;
+            hidePlayLoader();
+            Lampa.Noty.show('Не удалось получить данные для воспроизведения');
+        });
     }
 
     function playEpisode(episodeStub, showMeta, nextEpisodeStubs) {
@@ -1818,18 +1895,25 @@
         // Идентификатор для Trakt: tmdb сериала (из showMeta) + сезон/номер серии.
         var showTmdb = findTmdbId(showMeta);
         var trakt = showTmdb ? { type: 'episode', tmdb: showTmdb, season: episodeStub.parentIndex, number: episodeStub.index } : null;
+        var loader = showPlayLoader();
         Api.metadata(episodeStub.ratingKey).then(function (meta) {
+            if (loader.cancelled) return;
             var poster = meta.thumb ? plexUrl(meta.thumb) : (showMeta.thumb ? plexUrl(showMeta.thumb) : '');
             var cardData = { title: cleanPlexTitle(showMeta.title) + ' - ' + cleanPlexTitle(meta.title), img: poster };
 
             var upcoming = (nextEpisodeStubs || []).slice(0, 5);
-            if (upcoming.length) {
-                Promise.all(upcoming.map(function (e) { return Api.metadata(e.ratingKey).catch(function () { return null; }); }))
-                    .then(function (metas) { playMeta(meta, cardData, metas.filter(Boolean), resume, trakt); });
-            } else {
-                playMeta(meta, cardData, null, resume, trakt);
-            }
-        }).catch(function () { Lampa.Noty.show('Не удалось получить данные серии'); });
+            var upcomingMetas = upcoming.length
+                ? Promise.all(upcoming.map(function (e) { return Api.metadata(e.ratingKey).catch(function () { return null; }); }))
+                : Promise.resolve([]);
+            return upcomingMetas.then(function (metas) {
+                if (loader.cancelled) return;
+                playMeta(meta, cardData, metas.filter(Boolean), resume, trakt);
+            });
+        }).catch(function () {
+            if (loader.cancelled) return;
+            hidePlayLoader();
+            Lampa.Noty.show('Не удалось получить данные серии');
+        });
     }
 
     function reportProgressToPlex(ratingKey, timeSec, durationSec) {
@@ -2846,6 +2930,18 @@
             // display:none по умолчанию — просто показываем его своим классом.
             '.activity__loader.plex-loader-show{display:block}' +
             '.activity__body.plex-loader-dim{opacity:.35!important}' +
+            // Оверлей запуска воспроизведения — копия .trakt-at-overlay из
+            // LampaTrakt («Авто-торрент»). Отличие одно: сам слой ловит касания
+            // (у LampaTrakt pointer-events:none), чтобы тап по почти чёрному
+            // экрану не нажимал невидимые кнопки карточки под ним.
+            '@-webkit-keyframes plex-spin{from{-webkit-transform:rotate(0deg);transform:rotate(0deg)}to{-webkit-transform:rotate(360deg);transform:rotate(360deg)}}' +
+            '@keyframes plex-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}' +
+            '.plex-play-overlay{position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999;background:rgba(0,0,0,.95);display:-webkit-box;display:-webkit-flex;display:flex;-webkit-box-orient:vertical;-webkit-flex-direction:column;flex-direction:column;-webkit-box-align:center;-webkit-align-items:center;align-items:center;-webkit-box-pack:center;-webkit-justify-content:center;justify-content:center;gap:.8em}' +
+            '.plex-play-overlay__spinner{width:2.4em;height:2.4em;border-radius:50%;border:.25em solid rgba(255,255,255,.2);border-top-color:#fff;-webkit-animation:plex-spin .8s linear infinite;animation:plex-spin .8s linear infinite}' +
+            '.plex-play-overlay__status{color:#fff;font-size:2em;opacity:.9;text-align:center;padding:0 1em;text-shadow:0 1px 4px rgba(0,0,0,.6)}' +
+            '.plex-play-overlay__cancel{cursor:pointer;margin-top:.6em;padding:.6em 1.5em;border-radius:.7em;background:rgba(255,255,255,.16);color:#fff;font-size:1.3em;line-height:1;-webkit-transition:background .15s;transition:background .15s}' +
+            '.plex-play-overlay__cancel:hover{background:rgba(255,255,255,.3)}' +
+            '.plex-play-overlay__hint{color:#fff;opacity:.55;font-size:.85em;text-shadow:0 1px 4px rgba(0,0,0,.6)}' +
             '</style>').appendTo('head');
     }
 

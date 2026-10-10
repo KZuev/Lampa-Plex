@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.19';
+    var PLUGIN_VERSION = '1.7.20';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -1801,7 +1801,7 @@
 
         if (current.subtitles) playData.subtitles = current.subtitles;
 
-        _activePlexPlayback = { items: tracked, duration: (current.timeline && current.timeline.duration) || 0 };
+        _activePlexPlayback = { items: tracked, duration: (current.timeline && current.timeline.duration) || 0, external: false };
 
         Lampa.Player.play(playData);
     }
@@ -1849,7 +1849,53 @@
         }
     }
 
+    // Внешний плеер (Android-приложение Lampa, Lampa-App на iOS/tvOS и т.п.):
+    // Lampa отдаёт ему воспроизведение через AndroidJS.openPlayer и шлёт
+    // только 'external' — 'destroy' собственного плеера Lampa в этом случае
+    // не приходит никогда, и позиция в Plex не уходила вовсе. Внешний плеер
+    // возвращает позицию в Lampa.Timeline (по ходу просмотра и при
+    // закрытии), а Timeline на каждое изменение шлёт 'update' — по нему и
+    // отчитываемся, с паузой EXTERNAL_REPORT_DELAY после последнего
+    // обновления, чтобы не дёргать сервер на каждый тик.
+    var EXTERNAL_REPORT_DELAY = 5000;
+    var _externalReportTimer = null;
+
+    function reportExternalProgress() {
+        _externalReportTimer = null;
+        var info = _activePlexPlayback;
+        if (!info || !info.external) return;
+        (info.items || []).forEach(function (it) {
+            var road = Lampa.Timeline.view(timelineHash(it.ratingKey));
+            if (!road || !road.time) return;
+            if (road.time <= (it.t0 || 0) + 1) return;
+            var durSec = road.duration || info.duration;
+            reportProgressToPlex(it.ratingKey, road.time, durSec);
+            // Отчёт приходит много раз за сеанс, а запись в историю Trakt
+            // (/sync/history) не идемпотентна — после неё больше не шлём.
+            if (it.traktHistorySent) return;
+            var percent = durSec ? Math.round(road.time / durSec * 100) : 0;
+            if (traktScrobbleEnabled() && percent >= traktMinProgress()) it.traktHistorySent = true;
+            reportPlaybackToTrakt(it.trakt, road.time, durSec);
+        });
+    }
+
     function initTimelineSync() {
+        Lampa.Player.listener.follow('external', function () {
+            if (_activePlexPlayback) _activePlexPlayback.external = true;
+        });
+
+        if (Lampa.Timeline && Lampa.Timeline.listener) {
+            Lampa.Timeline.listener.follow('update', function (e) {
+                var info = _activePlexPlayback;
+                var hash = e && e.data && e.data.hash;
+                if (!info || !info.external || !hash) return;
+                var ours = (info.items || []).some(function (it) { return timelineHash(it.ratingKey) === hash; });
+                if (!ours) return;
+                clearTimeout(_externalReportTimer);
+                _externalReportTimer = setTimeout(reportExternalProgress, EXTERNAL_REPORT_DELAY);
+            });
+        }
+
         Lampa.Player.listener.follow('destroy', function () {
             if (!_activePlexPlayback) return;
             var info = _activePlexPlayback;

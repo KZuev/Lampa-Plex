@@ -9,7 +9,7 @@
     if (window.plex_plugin_ready) return;
     window.plex_plugin_ready = true;
 
-    var PLUGIN_VERSION = '1.7.21';
+    var PLUGIN_VERSION = '1.7.22';
     var PLEX_TV = 'https://plex.tv';
     var PLEX_PRODUCT = 'Lampa Plex';
 
@@ -259,6 +259,13 @@
 
         children: function (ratingKey) {
             return plexRequest('/library/metadata/' + ratingKey + '/children').then(function (mc) {
+                return mc.Metadata || [];
+            });
+        },
+
+        // Все серии сериала одним запросом (с viewOffset/parentIndex/index).
+        allLeaves: function (ratingKey) {
+            return plexRequest('/library/metadata/' + ratingKey + '/allLeaves').then(function (mc) {
                 return mc.Metadata || [];
             });
         },
@@ -1726,6 +1733,186 @@
 
     function timelineHash(ratingKey) { return 'plex_' + ratingKey; }
 
+    // ---------------------------------------------------------------------
+    // Общая позиция просмотра с торрентами/онлайн-источниками Lampa
+    // ---------------------------------------------------------------------
+    // Торренты (src/utils/episodes_parser.js, by_title) и сама карточка
+    // (Timeline.watched/watchedEpisode) хранят позицию под ключом карточки:
+    // фильм — hash(original_title), серия — hash([сезон, сезон>10?':':'',
+    // серия, original_title]) (у сериала Lampa подставляет original_name), а
+    // в новых Lampa ещё и с привязкой {card:'movie_<id>'|'tv_<id>', season,
+    // episode} (Timeline.link), по которой запись находится и при смене
+    // названия. Plex пишет своё под plex_<ratingKey>, поэтому раньше позиции
+    // не встречались вовсе. Правило синхронизации — «где дальше, то и верно».
+    function sharedHashString(movie, season, episode) {
+        if (!movie) return '';
+        if (season != null) {
+            var name = movie.original_name || movie.original_title;
+            return name ? [season, season > 10 ? ':' : '', episode, name].join('') : '';
+        }
+        return movie.original_title || '';
+    }
+
+    function sharedTimelineRef(movie, season, episode) {
+        var str = sharedHashString(movie, season, episode);
+        if (!str) return null;
+        var link = null;
+        try { if (typeof Lampa.Timeline.link === 'function') link = Lampa.Timeline.link(movie, season, episode); } catch (e) {}
+        return { hash: Lampa.Utils.hash(str), link: link };
+    }
+
+    function sharedRefForMeta(tmdbCard, m) {
+        if (!tmdbCard || !m) return null;
+        return m.type === 'episode' ? sharedTimelineRef(tmdbCard, m.parentIndex, m.index) : sharedTimelineRef(tmdbCard);
+    }
+
+    function readShared(ref) {
+        if (!ref) return null;
+        var v = Lampa.Timeline.view(ref.hash, ref.link || undefined);
+        return (v && v.time > 0) ? v : null;
+    }
+
+    // Пока пишем сами — свой же обработчик 'update' не должен принять это за
+    // прогресс торрента (и не отправлять его обратно в Plex).
+    var _writingOwnTimeline = false;
+
+    function writeShared(ref, time, duration) {
+        if (!ref || !(time > 0) || !(duration > 0)) return;
+        var params = { hash: ref.hash, time: time, duration: duration, percent: Math.min(100, Math.round(time / duration * 100)) };
+        if (ref.link) extend(params, ref.link);
+        _writingOwnTimeline = true;
+        try { Lampa.Timeline.update(params); } finally { _writingOwnTimeline = false; }
+    }
+
+    // Позиция Plex (мс) → общий ключ, только если она дальше уже сохранённой.
+    function raiseShared(ref, viewOffsetMs, durationMs) {
+        if (!ref || !(viewOffsetMs > 0) || !(durationMs > 0)) return;
+        var time = viewOffsetMs / 1000;
+        var cur = readShared(ref);
+        if (cur && cur.time >= time) return;
+        writeShared(ref, time, durationMs / 1000);
+    }
+
+    // Позиция в Plex могла уйти вперёд с другого устройства (приложение Plex
+    // на ТВ и т.п.) — при открытии карточки поднимаем её в общий ключ, чтобы
+    // торрент сразу стартовал с неё.
+    function pullPlexProgressToShared(info) {
+        if (!info || !info.movie) return;
+        if (info.method === 'movie') {
+            Api.metadata(info.ratingKey).then(function (m) {
+                raiseShared(sharedTimelineRef(info.movie), m.viewOffset, m.duration);
+            }).catch(function () {});
+        } else {
+            Api.allLeaves(info.ratingKey).then(function (eps) {
+                eps.forEach(function (ep) {
+                    if (ep.parentIndex == null || ep.index == null) return;
+                    raiseShared(sharedTimelineRef(info.movie, ep.parentIndex, ep.index), ep.viewOffset, ep.duration);
+                });
+            }).catch(function () {});
+        }
+    }
+
+    // Хэши всех серий открытой карточки сериала — чтобы узнать серию по хэшу
+    // торрента в Lampa без привязки road.card (старые версии).
+    var _episodeHashCache = { movie: null, map: {} };
+
+    function currentCardEpisodeHashes() {
+        var c = _currentPlexCardMatch;
+        if (!c || !c.movie || c.method !== 'tv') return {};
+        if (_episodeHashCache.movie === c.movie) return _episodeHashCache.map;
+        var seasons = [];
+        if (Array.isArray(c.movie.seasons) && c.movie.seasons.length) {
+            c.movie.seasons.forEach(function (s) { seasons.push({ n: s.season_number, count: s.episode_count }); });
+        } else {
+            for (var i = 1; i <= (c.movie.number_of_seasons || 0); i++) seasons.push({ n: i, count: 0 });
+        }
+        var map = {};
+        seasons.forEach(function (s) {
+            if (s.n == null) return;
+            var count = Math.min(s.count || 50, 300);
+            for (var ep = 1; ep <= count; ep++) {
+                var str = sharedHashString(c.movie, s.n, ep);
+                if (str) map[String(Lampa.Utils.hash(str))] = { season: s.n, episode: ep };
+            }
+        });
+        _episodeHashCache = { movie: c.movie, map: map };
+        return map;
+    }
+
+    // Чья это позиция (торренты/онлайн) в терминах Plex: по привязке road.card
+    // (новые Lampa) — независимо от открытой карточки; иначе — сверяя хэш с
+    // ключами текущей карточки (торрент запускается именно из неё).
+    function foreignProgressTarget(hash, road) {
+        var m = road && road.card && /^(movie|tv)_(\d+)$/.exec(String(road.card));
+        if (m) {
+            var entry = _plexTmdbIndex[m[1] + ':' + m[2]];
+            if (!entry) return null;
+            if (m[1] === 'movie') return { ratingKey: entry.ratingKey };
+            if (road.season == null || road.episode == null) return null;
+            return { showRatingKey: entry.ratingKey, season: road.season, episode: road.episode };
+        }
+        var c = _currentPlexCardMatch;
+        if (!c || !c.movie) return null;
+        if (c.method === 'movie') {
+            var ref = sharedTimelineRef(c.movie);
+            return ref && String(ref.hash) === String(hash) ? { ratingKey: c.ratingKey } : null;
+        }
+        var se = currentCardEpisodeHashes()[String(hash)];
+        return se ? { showRatingKey: c.ratingKey, season: se.season, episode: se.episode } : null;
+    }
+
+    var _plexEpisodeKeyCache = {};
+
+    function resolvePlexTargetKey(target) {
+        if (target.ratingKey) return Promise.resolve(target.ratingKey);
+        var cacheKey = target.showRatingKey + '|' + target.season + '|' + target.episode;
+        if (_plexEpisodeKeyCache[cacheKey]) return Promise.resolve(_plexEpisodeKeyCache[cacheKey]);
+        return Api.children(target.showRatingKey).then(function (seasons) {
+            var s = seasons.filter(function (x) { return x.type === 'season' && Number(x.index) === Number(target.season); })[0];
+            if (!s) return null;
+            return Api.children(s.ratingKey).then(function (eps) {
+                var e = eps.filter(function (x) { return x.type === 'episode' && Number(x.index) === Number(target.episode); })[0];
+                if (!e) return null;
+                _plexEpisodeKeyCache[cacheKey] = e.ratingKey;
+                return e.ratingKey;
+            });
+        });
+    }
+
+    // На сервер Plex уходит только позиция дальше той, что там уже есть; то,
+    // что Plex уже считает просмотренным, не трогаем.
+    function pushForeignProgressToPlex(target, time, duration) {
+        resolvePlexTargetKey(target).then(function (ratingKey) {
+            if (!ratingKey) return;
+            return Api.metadata(ratingKey).then(function (meta) {
+                if (meta.viewCount > 0 && !meta.viewOffset) return;
+                if (time <= (meta.viewOffset || 0) / 1000 + 1) return;
+                reportProgressToPlex(ratingKey, time, meta.duration ? meta.duration / 1000 : duration);
+            });
+        }).catch(function () {});
+    }
+
+    var FOREIGN_REPORT_DELAY = 5000;
+    var _foreignReports = {};
+
+    function scheduleForeignReport(hash, road) {
+        if (!isConfigured() || !syncEnabled()) return;
+        if (!road || !(road.time > 0) || !(road.duration > 0)) return;
+        var target = foreignProgressTarget(hash, road);
+        if (!target) return;
+        var key = String(hash);
+        if (_foreignReports[key]) clearTimeout(_foreignReports[key].timer);
+        _foreignReports[key] = {
+            target: target,
+            timer: setTimeout(function () {
+                var rec = _foreignReports[key];
+                delete _foreignReports[key];
+                var latest = Lampa.Timeline.view(hash);
+                pushForeignProgressToPlex(rec.target, latest.time || road.time, latest.duration || road.duration);
+            }, FOREIGN_REPORT_DELAY)
+        };
+    }
+
     function buildSubtitles(part) {
         var subs = [];
         ((part && part.Stream) || []).forEach(function (s) {
@@ -1746,7 +1933,7 @@
     // каждый элемент playlist несёт свой timeline, а воспроизводимый элемент
     // ОБЯЗАН присутствовать в playlist со своим url — именно оттуда внешний плеер
     // на Apple TV (tvOS Pro/infuse) берёт стартовую позицию (в URL-схеме её нет).
-    function buildPlexPlaylistItem(m, resume) {
+    function buildPlexPlaylistItem(m, resume, shared) {
         var mi = m.Media && m.Media[0];
         var mp = mi && mi.Part && mi.Part[0];
         if (!mp) return null;
@@ -1755,9 +1942,17 @@
         var viewOffsetMs = (resume && resume.viewOffset != null) ? resume.viewOffset : (m.viewOffset || 0);
         var duration = durationMs / 1000;
         var viewOffset = viewOffsetMs / 1000;
+        // «Где дальше» — Plex или общий ключ Lampa (торренты/онлайн). Почти
+        // досмотренное (≥90%, как порог /:/scrobble) за точку продолжения не
+        // считаем — как и сам Plex, который на нём обнуляет viewOffset.
+        var other = readShared(shared);
+        if (other && other.time > viewOffset &&
+            (!duration || other.time < duration * 0.9) &&
+            (!other.duration || other.time < other.duration * 0.9)) viewOffset = other.time;
         var percent = duration ? Math.min(100, Math.round(viewOffset / duration * 100)) : 0;
         // Пишем позицию и в Lampa.Timeline (хранилище file_view) — как LampaTrakt.
-        Lampa.Timeline.update({ hash: h, time: viewOffset, duration: duration, percent: percent });
+        _writingOwnTimeline = true;
+        try { Lampa.Timeline.update({ hash: h, time: viewOffset, duration: duration, percent: percent }); } finally { _writingOwnTimeline = false; }
         var subs = buildSubtitles(mp);
         var item = {
             title: cleanPlexTitle(m.grandparentTitle ? (m.grandparentTitle + ' - ' + m.title) : m.title),
@@ -1832,8 +2027,11 @@
         Lampa.Noty.show('Запуск воспроизведения отменён');
     }
 
-    function playMeta(meta, cardData, playlistMetas, resume, trakt) {
-        var current = buildPlexPlaylistItem(meta, resume);
+    // tmdbCard — карточка TMDB этого фильма/сериала (если известна): по ней
+    // считается общий с торрентами ключ позиции (sharedTimelineRef).
+    function playMeta(meta, cardData, playlistMetas, resume, trakt, tmdbCard) {
+        var currentShared = sharedRefForMeta(tmdbCard, meta);
+        var current = buildPlexPlaylistItem(meta, resume, currentShared);
         if (!current) { hidePlayLoader(); Lampa.Noty.show('Не найден файл для воспроизведения (нужен Direct Play — транскодирование не поддерживается)'); return; }
 
         // Плейлист начинается с ТЕКУЩЕГО элемента (его url === playData.url), далее
@@ -1844,15 +2042,16 @@
         // t0 — стартовая позиция элемента (сек), чтобы при закрытии отчитаться только
         // по тем, где позиция реально выросла (эту серию в этой сессии смотрели).
         var playlist = [current];
-        var tracked = [{ ratingKey: meta.ratingKey, trakt: trakt || null, t0: (current.timeline && current.timeline.time) || 0 }];
+        var tracked = [{ ratingKey: meta.ratingKey, trakt: trakt || null, t0: (current.timeline && current.timeline.time) || 0, shared: currentShared }];
         (playlistMetas || []).forEach(function (m) {
-            var it = buildPlexPlaylistItem(m);
+            var shared = sharedRefForMeta(tmdbCard, m);
+            var it = buildPlexPlaylistItem(m, null, shared);
             if (!it) return;
             playlist.push(it);
             var nextTrakt = (trakt && trakt.type === 'episode')
                 ? { type: 'episode', tmdb: trakt.tmdb, season: m.parentIndex, number: m.index }
                 : null;
-            tracked.push({ ratingKey: m.ratingKey, trakt: nextTrakt, t0: (it.timeline && it.timeline.time) || 0 });
+            tracked.push({ ratingKey: m.ratingKey, trakt: nextTrakt, t0: (it.timeline && it.timeline.time) || 0, shared: shared });
         });
 
         var playData = {
@@ -1876,11 +2075,17 @@
         releasePlayLoaderController();
     }
 
-    function playRatingKey(ratingKey, cardData, trakt) {
+    // Карточка TMDB, открытая сейчас (из 'complite'), если это тот же тайтл.
+    function tmdbCardFor(method, tmdbId) {
+        var c = _currentPlexCardMatch;
+        return (c && c.movie && c.method === method && tmdbId && String(c.tmdbId) === String(tmdbId)) ? c.movie : null;
+    }
+
+    function playRatingKey(ratingKey, cardData, trakt, tmdbCard) {
         var loader = showPlayLoader();
         Api.metadata(ratingKey).then(function (meta) {
             if (loader.cancelled) return;
-            playMeta(meta, cardData, null, null, trakt);
+            playMeta(meta, cardData, null, null, trakt, tmdbCard || tmdbCardFor('movie', findTmdbId(meta)));
         }).catch(function () {
             if (loader.cancelled) return;
             hidePlayLoader();
@@ -1907,7 +2112,7 @@
                 : Promise.resolve([]);
             return upcomingMetas.then(function (metas) {
                 if (loader.cancelled) return;
-                playMeta(meta, cardData, metas.filter(Boolean), resume, trakt);
+                playMeta(meta, cardData, metas.filter(Boolean), resume, trakt, tmdbCardFor('tv', showTmdb));
             });
         }).catch(function () {
             if (loader.cancelled) return;
@@ -1977,6 +2182,25 @@
                 if (!ours) return;
                 clearTimeout(_externalReportTimer);
                 _externalReportTimer = setTimeout(reportExternalProgress, EXTERNAL_REPORT_DELAY);
+            });
+
+            // Общая позиция с торрентами/онлайн (см. sharedTimelineRef):
+            //  • идёт просмотр через Plex (встроенный или внешний плеер) — сразу
+            //    дублируем позицию в общий ключ, чтобы торрент продолжил с неё;
+            //  • обновился чужой ключ (торренты/онлайн) тайтла, который есть в
+            //    Plex, — через FOREIGN_REPORT_DELAY тишины отправляем на сервер.
+            Lampa.Timeline.listener.follow('update', function (e) {
+                if (_writingOwnTimeline) return;
+                var hash = e && e.data && e.data.hash;
+                var road = e && e.data && e.data.road;
+                if (!hash || !road) return;
+                if (String(hash).indexOf('plex_') === 0) {
+                    var info = _activePlexPlayback;
+                    var it = info && (info.items || []).filter(function (x) { return timelineHash(x.ratingKey) === hash; })[0];
+                    if (it && it.shared) writeShared(it.shared, road.time, road.duration);
+                    return;
+                }
+                scheduleForeignReport(hash, road);
             });
         }
 
@@ -2658,17 +2882,36 @@
     // между 'complite' и открытием пользователем меню «Ещё» той же карточки.
     var _currentPlexCardMatch = null;
 
+    // Данные карточки TMDB из события 'complite'. В Lampa это e.data.movie
+    // (e.data — вся страница: movie, simular, …); прямого e.data.id там нет —
+    // его дописывает чужой обработчик LampaTrakt, и только при авторизованном
+    // Trakt (`if (e.type==='complite' && trakt_token)`). Из-за опоры на
+    // e.data.id кнопка «Смотреть из Plex» раньше пропадала без авторизации
+    // в LampaTrakt.
+    function fullCardMovie(e) {
+        var d = e && e.data;
+        if (d && d.movie && d.movie.id) return d.movie;
+        if (d && d.card && d.card.id) return d.card;
+        if (d && d.id) return d;
+        if (e && e.object && e.object.card && e.object.card.id) return e.object.card;
+        return null;
+    }
+
     function initFullCardHook() {
         Lampa.Listener.follow('full', function (e) {
             if (e.type === 'complite') {
-                if (!isConfigured() || !e.data || !e.data.id || !e.object) { _currentPlexCardMatch = null; return; }
+                var movie = fullCardMovie(e);
+                if (!isConfigured() || !movie || !e.object) { _currentPlexCardMatch = null; return; }
 
                 var method = e.object.method === 'tv' ? 'tv' : 'movie';
-                var match = _plexTmdbIndex[method + ':' + e.data.id];
+                var match = _plexTmdbIndex[method + ':' + movie.id];
 
-                _currentPlexCardMatch = match ? { ratingKey: match.ratingKey, method: method, tmdbId: e.data.id, title: e.data.title || e.data.name || '' } : null;
+                _currentPlexCardMatch = match ? { ratingKey: match.ratingKey, method: method, tmdbId: movie.id, title: movie.title || movie.name || '', movie: movie } : null;
 
-                if (match) injectPlexButton(e, match, method);
+                if (match) {
+                    injectPlexButton(e, match, method, movie);
+                    pullPlexProgressToShared(_currentPlexCardMatch);
+                }
                 else restorePlexPriorityIfNeeded();
             }
             else if (e.type === 'options' && _currentPlexCardMatch) {
@@ -2840,7 +3083,7 @@
     // закрепляем её штатным механизмом Lampa (см. pinPlexAsDefaultSource) —
     // порядок важен: это должно случиться синхронно, до того как компонент
     // full/start.js вызовет emit('groupButtons') сразу после события 'complite'.
-    function injectPlexButton(e, match, method) {
+    function injectPlexButton(e, match, method, movie) {
         var root = e.object.activity && typeof e.object.activity.render === 'function' ? e.object.activity.render() : null;
         if (!root) return;
 
@@ -2867,7 +3110,7 @@
                         Lampa.Noty.show('Не удалось получить данные Plex');
                     });
                 } else {
-                    playRatingKey(match.ratingKey, e.data, { type: 'movie', tmdb: e.data.id });
+                    playRatingKey(match.ratingKey, movie, { type: 'movie', tmdb: movie.id }, movie);
                 }
             });
 
